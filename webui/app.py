@@ -258,6 +258,14 @@ def process_pdf(job_id, pdf_path, output_dir):
         word_path = os.path.join(job_result_dir, f"{base_filename}.docx")
         create_word_from_markdown(markdown_path, word_path, os.path.join(job_result_dir, images_dir))
 
+        # 生成带文本的PDF
+        text_pdf_path = os.path.join(job_result_dir, f"{base_filename}_text.pdf")
+        create_text_pdf_from_markdown(markdown_path, text_pdf_path, os.path.join(job_result_dir, images_dir))
+
+        # 生成完整压缩包
+        complete_zip_path = os.path.join(job_result_dir, f"{base_filename}_complete.zip")
+        create_complete_zip(job_result_dir, complete_zip_path, base_filename)
+
         # 计算处理时间
         end_time = time.time()
         processing_time = end_time - start_time
@@ -267,9 +275,13 @@ def process_pdf(job_id, pdf_path, output_dir):
         jobs[job_id]['result'] = {
             'markdown_path': markdown_path,
             'word_path': word_path,
+            'text_pdf_path': text_pdf_path,
+            'complete_zip_path': complete_zip_path,
             'job_result_dir': job_result_dir,
             'filename': f"{base_filename}.md",
             'word_filename': f"{base_filename}.docx",
+            'text_pdf_filename': f"{base_filename}_text.pdf",
+            'complete_zip_filename': f"{base_filename}_complete.zip",
             'device_used': device,
             'model_dir': app.config['MODEL_DIR'],
             'processing_time': processing_time,
@@ -348,6 +360,117 @@ def create_word_from_markdown(markdown_path, word_path, images_dir):
         return True
     except Exception as e:
         logger.error(f"创建Word文档失败: {str(e)}")
+        return False
+
+def create_text_pdf_from_markdown(markdown_path, pdf_path, images_dir):
+    """将Markdown转换为带文本的PDF"""
+    try:
+        from reportlab.lib.pagesizes import letter, A4
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.lib.enums import TA_LEFT, TA_CENTER
+        import re
+
+        # 读取Markdown文件
+        with open(markdown_path, 'r', encoding='utf-8') as f:
+            md_content = f.read()
+
+        # 创建PDF文档
+        doc = SimpleDocTemplate(pdf_path, pagesize=A4)
+        styles = getSampleStyleSheet()
+
+        # 自定义样式
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=18,
+            spaceAfter=12,
+            alignment=TA_CENTER
+        )
+
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading2'],
+            fontSize=14,
+            spaceAfter=8
+        )
+
+        story = []
+
+        # 处理图片引用
+        image_pattern = r'!\[(.*?)\]\((.*?)\)'
+
+        # 分段处理Markdown内容
+        paragraphs = md_content.split('\n\n')
+
+        for para in paragraphs:
+            if not para.strip():
+                continue
+
+            # 处理图片
+            img_match = re.search(image_pattern, para)
+            if img_match:
+                alt_text = img_match.group(1)
+                img_path = img_match.group(2)
+
+                # 获取图片的完整路径
+                if img_path.startswith('images/'):
+                    full_img_path = os.path.join(images_dir, os.path.basename(img_path))
+                    if os.path.exists(full_img_path):
+                        try:
+                            img = Image(full_img_path, width=6*inch, height=4*inch)
+                            story.append(img)
+                            if alt_text:
+                                story.append(Paragraph(alt_text, styles['Caption']))
+                            story.append(Spacer(1, 12))
+                        except Exception as e:
+                            logger.warning(f"无法添加图片到PDF: {full_img_path}, 错误: {str(e)}")
+                continue
+
+            # 处理标题
+            if para.startswith('# '):
+                story.append(Paragraph(para[2:], title_style))
+            elif para.startswith('## '):
+                story.append(Paragraph(para[3:], heading_style))
+            elif para.startswith('### '):
+                story.append(Paragraph(para[4:], styles['Heading3']))
+            else:
+                # 处理普通段落
+                # 简单处理Markdown格式
+                para = para.replace('**', '<b>').replace('**', '</b>')
+                para = para.replace('*', '<i>').replace('*', '</i>')
+                story.append(Paragraph(para, styles['Normal']))
+                story.append(Spacer(1, 6))
+
+        # 构建PDF
+        doc.build(story)
+        logger.info(f"带文本PDF已保存: {pdf_path}")
+        return True
+    except Exception as e:
+        logger.error(f"创建带文本PDF失败: {str(e)}")
+        return False
+
+def create_complete_zip(job_result_dir, zip_path, base_filename):
+    """创建包含所有文件的完整压缩包"""
+    try:
+        import zipfile
+
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # 添加所有文件到压缩包
+            for root, dirs, files in os.walk(job_result_dir):
+                for file in files:
+                    if file.endswith('.zip'):  # 跳过其他zip文件
+                        continue
+                    file_path = os.path.join(root, file)
+                    # 计算相对路径
+                    arcname = os.path.relpath(file_path, job_result_dir)
+                    zipf.write(file_path, arcname)
+
+        logger.info(f"完整压缩包已创建: {zip_path}")
+        return True
+    except Exception as e:
+        logger.error(f"创建完整压缩包失败: {str(e)}")
         return False
 
 def process_next_job():
@@ -673,38 +796,70 @@ def download_file(job_id):
         return jsonify({'error': 'File not ready for download'}), 404
 
     job_result_dir = jobs[job_id]['result']['job_result_dir']
+    job_result = jobs[job_id]['result']
 
     # 根据请求参数确定下载类型
     file_type = request.args.get('type', 'markdown')
 
-    if file_type == 'word':
-        # 下载Word文档
-        word_filename = jobs[job_id]['result']['word_filename']
-        return send_from_directory(job_result_dir, word_filename, as_attachment=True)
-    else:
-        # 下载Markdown文件
-        filename = jobs[job_id]['result']['filename']
+    try:
+        if file_type == 'word':
+            # 下载Word文档
+            word_filename = job_result['word_filename']
+            if os.path.exists(os.path.join(job_result_dir, word_filename)):
+                return send_from_directory(job_result_dir, word_filename, as_attachment=True)
+            else:
+                return jsonify({'error': 'Word文档不存在'}), 404
 
-        # Create a zip file if images are present
-        images_dir = os.path.join(job_result_dir, 'images')
-        if os.path.exists(images_dir) and os.listdir(images_dir):
-            import zipfile
-            zip_path = os.path.join(job_result_dir, f"{os.path.splitext(filename)[0]}_with_images.zip")
+        elif file_type == 'pdf':
+            # 下载带文本的PDF
+            if 'text_pdf_filename' in job_result:
+                text_pdf_filename = job_result['text_pdf_filename']
+                if os.path.exists(os.path.join(job_result_dir, text_pdf_filename)):
+                    return send_from_directory(job_result_dir, text_pdf_filename, as_attachment=True)
+            return jsonify({'error': '带文本PDF不存在'}), 404
 
-            with zipfile.ZipFile(zip_path, 'w') as zipf:
-                # Add markdown file
-                md_path = os.path.join(job_result_dir, filename)
-                zipf.write(md_path, arcname=filename)
+        elif file_type == 'zip':
+            # 下载完整压缩包
+            if 'complete_zip_filename' in job_result:
+                complete_zip_filename = job_result['complete_zip_filename']
+                if os.path.exists(os.path.join(job_result_dir, complete_zip_filename)):
+                    return send_from_directory(job_result_dir, complete_zip_filename, as_attachment=True)
+            return jsonify({'error': '完整压缩包不存在'}), 404
 
-                # Add all images
-                for img_file in os.listdir(images_dir):
-                    img_path = os.path.join(images_dir, img_file)
-                    zipf.write(img_path, arcname=os.path.join('images', img_file))
+        else:  # markdown (默认)
+            # 下载Markdown文件
+            filename = job_result['filename']
 
-            return send_from_directory(job_result_dir, f"{os.path.splitext(filename)[0]}_with_images.zip", as_attachment=True)
+            # 检查是否有图片，如果有则创建包含图片的zip文件
+            images_dir = os.path.join(job_result_dir, 'images')
+            if os.path.exists(images_dir) and os.listdir(images_dir):
+                import zipfile
+                zip_filename = f"{os.path.splitext(filename)[0]}_with_images.zip"
+                zip_path = os.path.join(job_result_dir, zip_filename)
 
-        # If no images, just return the markdown file
-        return send_from_directory(job_result_dir, filename, as_attachment=True)
+                # 如果zip文件不存在，创建它
+                if not os.path.exists(zip_path):
+                    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        # 添加markdown文件
+                        md_path = os.path.join(job_result_dir, filename)
+                        zipf.write(md_path, arcname=filename)
+
+                        # 添加所有图片
+                        for img_file in os.listdir(images_dir):
+                            img_path = os.path.join(images_dir, img_file)
+                            zipf.write(img_path, arcname=os.path.join('images', img_file))
+
+                return send_from_directory(job_result_dir, zip_filename, as_attachment=True)
+
+            # 如果没有图片，直接返回markdown文件
+            if os.path.exists(os.path.join(job_result_dir, filename)):
+                return send_from_directory(job_result_dir, filename, as_attachment=True)
+            else:
+                return jsonify({'error': 'Markdown文件不存在'}), 404
+
+    except Exception as e:
+        logger.error(f"下载文件失败: {str(e)}")
+        return jsonify({'error': f'下载失败: {str(e)}'}), 500
 
 @app.route('/batch_size', methods=['POST'])
 def set_batch_size():

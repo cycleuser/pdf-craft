@@ -390,9 +390,26 @@ document.addEventListener('DOMContentLoaded', function() {
                                 <span>${progress}%</span>
                             </td>
                             <td>
-                                <button class="action-button download-button" onclick="downloadJob('${job.id}')" ${job.status !== 'completed' ? 'disabled' : ''} title="下载文件">
-                                    <i class="fas fa-download"></i>
-                                </button>
+                                                    <div class="download-dropdown" ${job.status !== 'completed' ? 'style="display:none"' : ''}>
+                        <button class="action-button download-button" onclick="toggleDownloadMenu('${job.id}')" ${job.status !== 'completed' ? 'disabled' : ''} title="下载选项">
+                            <i class="fas fa-download"></i>
+                            <i class="fas fa-chevron-down"></i>
+                        </button>
+                        <div class="download-menu" id="download-menu-${job.id}" style="display: none;">
+                            <a href="#" onclick="downloadJob('${job.id}', 'markdown')" class="download-option">
+                                <i class="fab fa-markdown"></i> Markdown
+                            </a>
+                            <a href="#" onclick="downloadJob('${job.id}', 'word')" class="download-option">
+                                <i class="fas fa-file-word"></i> Word文档
+                            </a>
+                            <a href="#" onclick="downloadJob('${job.id}', 'pdf')" class="download-option">
+                                <i class="fas fa-file-pdf"></i> 带文本PDF
+                            </a>
+                            <a href="#" onclick="downloadJob('${job.id}', 'zip')" class="download-option">
+                                <i class="fas fa-file-archive"></i> 完整压缩包
+                            </a>
+                        </div>
+                    </div>
                                 <button class="action-button delete-button" onclick="deleteJob('${job.id}')" title="删除任务">
                                     <i class="fas fa-trash"></i>
                                 </button>
@@ -422,9 +439,45 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // 全局函数
-    window.downloadJob = function(jobId) {
-        window.location.href = `/download/${jobId}`;
+    // 切换下载菜单显示
+    window.toggleDownloadMenu = function(jobId) {
+        const menu = document.getElementById(`download-menu-${jobId}`);
+        const isVisible = menu.style.display !== 'none';
+
+        // 隐藏所有其他下载菜单
+        document.querySelectorAll('.download-menu').forEach(m => {
+            m.style.display = 'none';
+        });
+
+        // 切换当前菜单
+        menu.style.display = isVisible ? 'none' : 'block';
     };
+
+    // 下载文件函数
+    window.downloadJob = function(jobId, type = 'markdown') {
+        // 隐藏下载菜单
+        const menu = document.getElementById(`download-menu-${jobId}`);
+        if (menu) {
+            menu.style.display = 'none';
+        }
+
+        // 根据类型构建下载URL
+        let downloadUrl = `/download/${jobId}`;
+        if (type !== 'markdown') {
+            downloadUrl += `?type=${type}`;
+        }
+
+        window.location.href = downloadUrl;
+    };
+
+    // 点击其他地方时隐藏下载菜单
+    document.addEventListener('click', function(event) {
+        if (!event.target.closest('.download-dropdown')) {
+            document.querySelectorAll('.download-menu').forEach(menu => {
+                menu.style.display = 'none';
+            });
+        }
+    });
 
     window.deleteJob = function(jobId) {
         if (confirm('确定要删除此作业吗？')) {

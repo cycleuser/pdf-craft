@@ -5,3 +5,5 @@ onnxruntime==1.21.0
 torch>=2.0.0
 python-docx>=0.8.11
 markdown>=3.4.0
+reportlab>=3.6.0
+requests>=2.25.0

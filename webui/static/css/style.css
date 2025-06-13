@@ -546,6 +546,63 @@ header p {
     background-color: #f8f9fa;
 }
 
+/* 下载下拉菜单样式 */
+.download-dropdown {
+    position: relative;
+    display: inline-block;
+}
+
+.download-button {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.download-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 1000;
+    min-width: 160px;
+    overflow: hidden;
+}
+
+.download-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 15px;
+    text-decoration: none;
+    color: #333;
+    font-size: 14px;
+    transition: background-color 0.2s ease;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.download-option:last-child {
+    border-bottom: none;
+}
+
+.download-option:hover {
+    background-color: #f8f9fa;
+    color: #007bff;
+    text-decoration: none;
+}
+
+.download-option i {
+    width: 16px;
+    text-align: center;
+    color: #666;
+}
+
+.download-option:hover i {
+    color: #007bff;
+}
+
 /* 响应式设计 */
 @media (max-width: 768px) {
     .settings-panel {
@@ -565,5 +622,10 @@ header p {
     .modal-content {
         width: 95%;
         margin: 5% auto;
+    }
+
+    .download-menu {
+        right: auto;
+        left: 0;
     }
 }
