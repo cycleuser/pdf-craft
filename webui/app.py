@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import uuid
 import json
@@ -23,6 +24,39 @@ app.config['ALLOWED_EXTENSIONS'] = {'pdf'}
 app.config['USE_GPU'] = False  # 默认使用CPU，可以在这里修改为True来使用GPU
 app.config['BATCH_SIZE'] = 5  # 批处理大小，可以根据系统性能调整
 
+# OCR级别配置
+OCR_LEVELS = {
+    'fast': {'name': '快速', 'description': '快速OCR处理，适合简单文档'},
+    'standard': {'name': '标准 (默认)', 'description': '标准OCR处理，平衡速度和准确性'},
+    'accurate': {'name': '精确', 'description': '高精度OCR处理，适合复杂文档'},
+    'detailed': {'name': '详细', 'description': '最详细的OCR处理，包含更多元数据'},
+}
+
+# 表格提取格式
+TABLE_FORMATS = {
+    'none': {'name': '不提取', 'description': '跳过表格提取'},
+    'simple': {'name': '简单', 'description': '基本表格提取'},
+    'standard': {'name': '标准 (默认)', 'description': '标准表格处理，保持格式'},
+    'advanced': {'name': '高级', 'description': '高级表格处理，包含样式信息'},
+}
+
+# Ollama模型配置
+OLLAMA_MODELS = {
+    'none': {'name': '不使用LLM', 'description': '不使用大语言模型进行处理'},
+    'llama3': {'name': 'Llama 3', 'description': '使用Llama 3模型进行处理'},
+    'mistral': {'name': 'Mistral', 'description': '使用Mistral模型进行处理'},
+    'gemma': {'name': 'Gemma', 'description': '使用Gemma模型进行处理'},
+    'phi3': {'name': 'Phi-3', 'description': '使用Phi-3模型进行处理'},
+}
+
+# 默认配置
+DEFAULT_CONFIG = {
+    'ocr_level': 'standard',
+    'extract_formula': False,
+    'extract_table_format': 'standard',
+    'ollama_model': 'none',
+}
+
 # Ensure directories exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['RESULTS_FOLDER'], exist_ok=True)
@@ -36,6 +70,8 @@ job_queue = []
 active_jobs = 0
 # 线程锁
 queue_lock = threading.Lock()
+# 当前模型配置
+current_config = DEFAULT_CONFIG.copy()
 
 # 从文件加载作业状态
 def load_jobs():
@@ -106,6 +142,56 @@ class ProgressReporter:
             save_jobs()
             self.last_save_time = current_time
 
+# 初始化Ollama LLM
+def init_ollama_llm(model_name):
+    """初始化Ollama LLM"""
+    if model_name == 'none':
+        logger.info("不使用LLM模型")
+        return None
+
+    try:
+        # 尝试导入LLM，如果不存在则返回None
+        try:
+            from pdf_craft import LLM
+            logger.info(f"成功导入LLM模块")
+
+            # 初始化Ollama LLM
+            llm = LLM(
+                url="http://localhost:11434",  # Ollama默认地址
+                model=model_name,
+                token_encoding="o200k_base"
+            )
+            logger.info(f"成功初始化Ollama LLM模型: {model_name}")
+            return llm
+        except ImportError:
+            logger.warning("pdf_craft库中不存在LLM模块，跳过LLM初始化")
+            return None
+        except Exception as e:
+            logger.error(f"初始化Ollama LLM失败: {str(e)}")
+            return None
+    except Exception as e:
+        logger.error(f"初始化Ollama LLM时出错: {str(e)}")
+        return None
+
+# 检查Ollama是否可用
+def check_ollama_available():
+    """检查Ollama服务是否可用"""
+    import requests
+    try:
+        response = requests.get("http://localhost:11434/api/version", timeout=2)
+        if response.status_code == 200:
+            # 获取可用模型
+            models_response = requests.get("http://localhost:11434/api/tags", timeout=2)
+            if models_response.status_code == 200:
+                models_data = models_response.json()
+                available_models = [model['name'] for model in models_data.get('models', [])]
+                logger.info(f"Ollama可用，已发现模型: {available_models}")
+                return True, available_models
+            return True, []
+        return False, []
+    except:
+        return False, []
+
 def process_pdf(job_id, pdf_path, output_dir):
     global active_jobs
     try:
@@ -132,11 +218,28 @@ def process_pdf(job_id, pdf_path, output_dir):
         device = "cuda" if app.config['USE_GPU'] else "cpu"
         logger.info(f"Job {job_id}: Using device: {device}")
 
-        # Initialize PDF extractor
+        # 获取作业配置
+        job_config = jobs[job_id].get('config', current_config)
+
+        # 获取Ollama模型配置
+        ollama_model = job_config.get('ollama_model', 'none')
+
+        # 初始化LLM（如果选择了模型）
+        llm = None
+        if ollama_model != 'none':
+            llm = init_ollama_llm(ollama_model)
+
+        # Initialize PDF extractor with configuration
         extractor = PDFPageExtractor(
             device=device,
             model_dir_path=app.config['MODEL_DIR']
         )
+
+        # 记录使用的配置
+        config_info = {
+            'device': device,
+            'ollama_model': ollama_model
+        }
 
         # 获取并记录模型信息
         model_files = os.listdir(app.config['MODEL_DIR']) if os.path.exists(app.config['MODEL_DIR']) else []
@@ -144,7 +247,7 @@ def process_pdf(job_id, pdf_path, output_dir):
 
         # 记录开始处理PDF
         start_time = time.time()
-        logger.info(f"Job {job_id}: Starting PDF processing with {device} acceleration")
+        logger.info(f"Job {job_id}: Starting PDF processing with {device} acceleration and config: {config_info}")
 
         # Process PDF and write to markdown
         with MarkDownWriter(markdown_path, images_dir, "utf-8") as md:
@@ -169,7 +272,8 @@ def process_pdf(job_id, pdf_path, output_dir):
             'word_filename': f"{base_filename}.docx",
             'device_used': device,
             'model_dir': app.config['MODEL_DIR'],
-            'processing_time': processing_time
+            'processing_time': processing_time,
+            'config': config_info
         }
         logger.info(f"Job {job_id}: Completed successfully in {processing_time:.2f} seconds")
         save_jobs()  # 保存完成状态
@@ -269,14 +373,87 @@ def process_next_job():
 
 @app.route('/')
 def index():
-    # 传递设备信息到模板
-    return render_template('index.html', use_gpu=app.config['USE_GPU'])
+    # 检查Ollama是否可用
+    ollama_available, available_models = check_ollama_available()
+
+    # 如果Ollama可用，更新模型列表
+    if ollama_available and available_models:
+        # 更新OLLAMA_MODELS，保留'none'选项
+        none_option = OLLAMA_MODELS['none']
+        OLLAMA_MODELS.clear()
+        OLLAMA_MODELS['none'] = none_option
+
+        # 添加可用模型
+        for model in available_models:
+            model_id = model.lower().replace(':', '-')
+            OLLAMA_MODELS[model_id] = {
+                'name': model,
+                'description': f'使用{model}模型进行处理'
+            }
+
+    # 传递设备信息和模型配置到模板
+    return render_template('index.html',
+                          use_gpu=app.config['USE_GPU'],
+                          ocr_levels=OCR_LEVELS,
+                          table_formats=TABLE_FORMATS,
+                          ollama_models=OLLAMA_MODELS,
+                          ollama_available=ollama_available,
+                          current_config=current_config)
 
 @app.route('/toggle_gpu', methods=['POST'])
 def toggle_gpu():
     app.config['USE_GPU'] = not app.config['USE_GPU']
     logger.info(f"GPU acceleration {'enabled' if app.config['USE_GPU'] else 'disabled'}")
     return jsonify({'use_gpu': app.config['USE_GPU']})
+
+@app.route('/update_config', methods=['POST'])
+def update_config():
+    """更新模型配置"""
+    global current_config
+    try:
+        data = request.get_json()
+
+        # 验证OCR级别
+        if 'ocr_level' in data and data['ocr_level'] in OCR_LEVELS:
+            current_config['ocr_level'] = data['ocr_level']
+
+        # 验证表格提取格式
+        if 'extract_table_format' in data and data['extract_table_format'] in TABLE_FORMATS:
+            current_config['extract_table_format'] = data['extract_table_format']
+
+        # 验证是否提取公式
+        if 'extract_formula' in data:
+            current_config['extract_formula'] = bool(data['extract_formula'])
+
+        # 验证Ollama模型
+        if 'ollama_model' in data and data['ollama_model'] in OLLAMA_MODELS:
+            current_config['ollama_model'] = data['ollama_model']
+
+        logger.info(f"模型配置已更新: {current_config}")
+
+        return jsonify({
+            'success': True,
+            'config': current_config
+        })
+    except Exception as e:
+        logger.error(f"更新模型配置失败: {str(e)}")
+        return jsonify({'error': str(e)}), 400
+
+@app.route('/reset_config', methods=['POST'])
+def reset_config():
+    """重置模型配置为默认值"""
+    global current_config
+    try:
+        current_config = DEFAULT_CONFIG.copy()
+        logger.info(f"模型配置已重置为默认值: {current_config}")
+
+        return jsonify({
+            'success': True,
+            'config': current_config
+        })
+    except Exception as e:
+        logger.error(f"重置模型配置失败: {str(e)}")
+        return jsonify({'error': str(e)}), 400
 
 @app.route('/system_info')
 def system_info():
@@ -291,6 +468,12 @@ def system_info():
         cuda_device_count = 0
         cuda_device_name = "PyTorch not installed"
 
+    # 获取系统信息
+    import platform
+    import sys
+    os_info = f"{platform.system()} {platform.release()}"
+    python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+
     # 获取模型目录信息
     model_dir = app.config['MODEL_DIR']
     model_files = os.listdir(model_dir) if os.path.exists(model_dir) else []
@@ -302,14 +485,22 @@ def system_info():
         'batch_size': app.config['BATCH_SIZE']
     }
 
+    # 检查Ollama是否可用
+    ollama_available, available_models = check_ollama_available()
+
     return jsonify({
         'use_gpu': app.config['USE_GPU'],
         'cuda_available': cuda_available,
         'cuda_device_count': cuda_device_count,
         'cuda_device_name': cuda_device_name,
+        'os_info': os_info,
+        'python_version': python_version,
         'model_dir': model_dir,
         'model_files': model_files,
-        'queue_info': queue_info
+        'queue_info': queue_info,
+        'current_config': current_config,
+        'ollama_available': ollama_available,
+        'ollama_models': available_models if ollama_available else []
     })
 
 @app.route('/upload', methods=['POST'])
@@ -321,6 +512,18 @@ def upload_file():
 
     if not files or files[0].filename == '':
         return jsonify({'error': 'No files selected'}), 400
+
+    # 获取作业配置
+    job_config = {}
+    if request.form.get('use_custom_config') == 'true':
+        # 使用自定义配置
+        job_config['ocr_level'] = request.form.get('ocr_level', current_config['ocr_level'])
+        job_config['extract_table_format'] = request.form.get('extract_table_format', current_config['extract_table_format'])
+        job_config['extract_formula'] = request.form.get('extract_formula') == 'true'
+        job_config['ollama_model'] = request.form.get('ollama_model', current_config['ollama_model'])
+    else:
+        # 使用全局配置
+        job_config = current_config.copy()
 
     uploaded_files = []
     for file in files:
@@ -347,7 +550,8 @@ def upload_file():
                     'total_pages': 0,
                     'percentage': 0
                 },
-                'created_at': time.time()
+                'created_at': time.time(),
+                'config': job_config
             }
 
             # 将作业添加到队列
@@ -359,23 +563,109 @@ def upload_file():
 
             uploaded_files.append({
                 'job_id': job_id,
-                'filename': filename
+                'filename': filename,
+                'config': job_config
             })
 
     # 启动队列处理
     process_next_job()
 
-    return jsonify({'message': 'Files uploaded successfully', 'jobs': uploaded_files})
+    return jsonify({'success': True, 'message': 'Files uploaded successfully', 'jobs': uploaded_files})
 
 @app.route('/jobs')
 def get_jobs():
     return jsonify({'jobs': list(jobs.values())})
+
+@app.route('/clear_all_jobs', methods=['POST'])
+def clear_all_jobs():
+    """清空所有任务和相关文件"""
+    global jobs, job_queue, active_jobs
+    try:
+        with queue_lock:
+            # 清空任务队列和状态
+            jobs.clear()
+            job_queue.clear()
+            active_jobs = 0
+
+            # 删除任务状态文件
+            if os.path.exists(app.config['JOBS_FILE']):
+                os.remove(app.config['JOBS_FILE'])
+
+            # 清空上传文件夹
+            upload_folder = app.config['UPLOAD_FOLDER']
+            if os.path.exists(upload_folder):
+                for filename in os.listdir(upload_folder):
+                    file_path = os.path.join(upload_folder, filename)
+                    try:
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                        elif os.path.isdir(file_path):
+                            import shutil
+                            shutil.rmtree(file_path)
+                    except Exception as e:
+                        logger.warning(f"删除上传文件失败: {file_path}, 错误: {str(e)}")
+
+            # 清空结果文件夹
+            results_folder = app.config['RESULTS_FOLDER']
+            if os.path.exists(results_folder):
+                for filename in os.listdir(results_folder):
+                    file_path = os.path.join(results_folder, filename)
+                    try:
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                        elif os.path.isdir(file_path):
+                            import shutil
+                            shutil.rmtree(file_path)
+                    except Exception as e:
+                        logger.warning(f"删除结果文件失败: {file_path}, 错误: {str(e)}")
+
+        logger.info("所有任务和文件已清空")
+        return jsonify({'success': True, 'message': '所有任务和文件已清空'})
+    except Exception as e:
+        logger.error(f"清空任务失败: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/job/<job_id>')
 def get_job(job_id):
     if job_id in jobs:
         return jsonify(jobs[job_id])
     return jsonify({'error': 'Job not found'}), 404
+
+@app.route('/job/<job_id>', methods=['DELETE'])
+def delete_job(job_id):
+    if job_id not in jobs:
+        return jsonify({'success': False, 'error': 'Job not found'}), 404
+
+    try:
+        # 从队列中移除作业（如果存在）
+        with queue_lock:
+            if job_id in job_queue:
+                job_queue.remove(job_id)
+
+        # 删除作业文件
+        job = jobs[job_id]
+        if 'file_path' in job and os.path.exists(job['file_path']):
+            os.remove(job['file_path'])
+
+        # 删除结果文件夹
+        if 'result' in job and 'job_result_dir' in job['result']:
+            import shutil
+            result_dir = job['result']['job_result_dir']
+            if os.path.exists(result_dir):
+                shutil.rmtree(result_dir)
+
+        # 从作业字典中删除
+        del jobs[job_id]
+
+        # 保存状态
+        save_jobs()
+
+        logger.info(f"作业 {job_id} 已删除")
+        return jsonify({'success': True, 'message': 'Job deleted successfully'})
+
+    except Exception as e:
+        logger.error(f"删除作业 {job_id} 失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/download/<job_id>')
 def download_file(job_id):

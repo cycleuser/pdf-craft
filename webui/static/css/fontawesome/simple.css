@@ -1,0 +1,58 @@
+/* Font Awesome 6.4.0 - Simplified Version */
+@font-face {
+  font-family: 'Font Awesome 6 Free';
+  font-style: normal;
+  font-weight: 900;
+  font-display: block;
+      src: url('../../webfonts/fa-solid-900.woff2') format('woff2'),
+         url('../../webfonts/fa-solid-900.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Font Awesome 6 Free';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+      src: url('../../webfonts/fa-regular-400.woff2') format('woff2'),
+         url('../../webfonts/fa-regular-400.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Font Awesome 6 Brands';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+      src: url('../../webfonts/fa-brands-400.woff2') format('woff2'),
+         url('../../webfonts/fa-brands-400.ttf') format('truetype');
+}
+
+.fa, .fas, .far, .fab {
+  font-family: 'Font Awesome 6 Free';
+  font-weight: 900;
+  font-style: normal;
+  font-variant: normal;
+  text-rendering: auto;
+  line-height: 1;
+  display: inline-block;
+}
+
+.far {
+  font-weight: 400;
+}
+
+.fab {
+  font-family: 'Font Awesome 6 Brands';
+  font-weight: 400;
+}
+
+/* Icon definitions */
+.fa-home:before { content: '\f015'; }
+.fa-user:before { content: '\f007'; }
+.fa-cog:before { content: '\f013'; }
+.fa-info-circle:before { content: '\f05a'; }
+.fa-cloud-upload-alt:before { content: '\f0ee'; }
+.fa-eye:before { content: '\f06e'; }
+.fa-download:before { content: '\f019'; }
+.fa-trash:before { content: '\f1f8'; }
+.fa-heart:before { content: '\f004'; }
+.fa-github:before { content: '\f09b'; }

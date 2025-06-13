@@ -1,87 +1,569 @@
 /* Custom styles for PDF to Markdown Converter */
 
 body {
-    background-color: #f8f9fa;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    line-height: 1.6;
+    color: #333;
+    background-color: #f5f5f5;
+    margin: 0;
+    padding: 0;
 }
 
 .container {
-    max-width: 1000px;
-}
-
-.card {
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    border: none;
-}
-
-.card-header {
-    background-color: #f1f8ff;
-    border-bottom: 1px solid #e3f2fd;
-}
-
-.progress {
-    height: 20px;
-}
-
-.btn-download {
-    min-width: 100px;
-}
-
-.status-badge {
-    font-size: 0.85rem;
-    padding: 0.35em 0.65em;
-}
-
-.status-queued {
-    background-color: #6c757d;
-}
-
-.status-processing {
-    background-color: #0d6efd;
-}
-
-.status-completed {
-    background-color: #198754;
-}
-
-.status-failed {
-    background-color: #dc3545;
-}
-
-#upload-form {
-    border: 2px dashed #dee2e6;
+    max-width: 1200px;
+    margin: 0 auto;
     padding: 20px;
-    border-radius: 5px;
-    background-color: #f8f9fa;
-    transition: all 0.3s ease;
 }
 
-#upload-form:hover {
-    border-color: #0d6efd;
+header {
+    text-align: center;
+    margin-bottom: 30px;
 }
 
-.drag-active {
-    border-color: #0d6efd !important;
-    background-color: #e8f0fe !important;
+header h1 {
+    color: #2c3e50;
+    margin-bottom: 10px;
 }
 
-.file-input-wrapper {
+header p {
+    color: #7f8c8d;
+    font-size: 1.1em;
+}
+
+/* 设置面板 */
+.settings-panel {
+    background-color: #fff;
+    border-radius: 8px;
+    padding: 15px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.device-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.toggle-switch {
     position: relative;
-    overflow: hidden;
     display: inline-block;
+    width: 60px;
+    height: 30px;
 }
 
-.file-input-wrapper input[type=file] {
-    font-size: 100px;
-    position: absolute;
-    left: 0;
-    top: 0;
+.toggle-switch input {
     opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.toggle-switch label {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #ccc;
+    transition: .4s;
+    border-radius: 34px;
+}
+
+.toggle-switch label:before {
+    position: absolute;
+    content: "";
+    height: 22px;
+    width: 22px;
+    left: 4px;
+    bottom: 4px;
+    background-color: white;
+    transition: .4s;
+    border-radius: 50%;
+}
+
+.toggle-switch input:checked + label {
+    background-color: #2196F3;
+}
+
+.toggle-switch input:checked + label:before {
+    transform: translateX(30px);
+}
+
+#device-label {
+    font-weight: bold;
+    min-width: 40px;
+}
+
+.batch-size-control {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.batch-size-control input {
+    width: 60px;
+    padding: 5px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+
+.batch-size-control button {
+    padding: 5px 10px;
+    background-color: #3498db;
+    color: white;
+    border: none;
+    border-radius: 4px;
     cursor: pointer;
 }
 
-/* Responsive adjustments */
+.info-button {
+    padding: 8px 15px;
+    background-color: #2c3e50;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.info-button:hover {
+    background-color: #1a252f;
+}
+
+/* 模型配置面板 */
+.model-config-panel {
+    background-color: #fff;
+    border-radius: 8px;
+    padding: 15px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.model-config-panel h2 {
+    margin-top: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.toggle-button {
+    padding: 5px 10px;
+    background-color: #ecf0f1;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8em;
+}
+
+.config-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 20px;
+    margin-bottom: 20px;
+}
+
+.config-option {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.config-option label {
+    font-weight: bold;
+}
+
+.config-option select {
+    padding: 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    background-color: #fff;
+}
+
+.option-description {
+    font-size: 0.9em;
+    color: #7f8c8d;
+    margin-top: 5px;
+}
+
+.warning-text {
+    color: #e74c3c;
+    font-weight: bold;
+}
+
+.error-text {
+    color: #e74c3c;
+    font-weight: bold;
+}
+
+.config-buttons {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+}
+
+.primary-button {
+    padding: 8px 16px;
+    background-color: #3498db;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.secondary-button {
+    padding: 8px 16px;
+    background-color: #ecf0f1;
+    color: #333;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+/* 上传区域 */
+.upload-section {
+    margin-bottom: 30px;
+}
+
+.upload-container {
+    background-color: #fff;
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+#drop-area {
+    border: 2px dashed #ccc;
+    border-radius: 8px;
+    padding: 20px;
+    text-align: center;
+    margin: 20px 0;
+    transition: all 0.3s ease;
+}
+
+#drop-area.highlight {
+    border-color: #4CAF50;
+    background-color: rgba(76, 175, 80, 0.1);
+}
+
+.file-label {
+    display: block;
+    cursor: pointer;
+    padding: 30px 0;
+}
+
+.file-label i {
+    font-size: 48px;
+    color: #4CAF50;
+    margin-bottom: 10px;
+    display: block;
+}
+
+.file-label span {
+    font-size: 1.2em;
+    color: #7f8c8d;
+}
+
+.upload-options {
+    margin-top: 20px;
+    text-align: left;
+    padding: 0 20px;
+}
+
+.option-item {
+    margin-bottom: 10px;
+}
+
+.upload-button {
+    background-color: #4CAF50;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-top: 20px;
+    font-size: 16px;
+    transition: background-color 0.3s ease;
+}
+
+.upload-button:hover {
+    background-color: #45a049;
+}
+
+.upload-button:disabled {
+    background-color: #cccccc;
+    cursor: not-allowed;
+}
+
+/* 作业列表 */
+.jobs-section {
+    background-color: #fff;
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.jobs-section h2 {
+    color: #2c3e50;
+    margin-bottom: 15px;
+}
+
+.clear-button {
+    background-color: #e74c3c;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    margin-bottom: 15px;
+    transition: background-color 0.3s;
+}
+
+.clear-button:hover {
+    background-color: #c0392b;
+}
+
+.clear-button:disabled {
+    background-color: #bdc3c7;
+    cursor: not-allowed;
+}
+
+.jobs-container {
+    margin-top: 20px;
+    overflow-x: auto;
+}
+
+#jobsTable {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+#jobsTable th,
+#jobsTable td {
+    padding: 12px;
+    text-align: left;
+    border-bottom: 1px solid #ddd;
+}
+
+#jobsTable th {
+    background-color: #f2f2f2;
+    font-weight: bold;
+}
+
+.status-badge {
+    padding: 5px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+.status-queued {
+    background-color: #f0ad4e;
+    color: white;
+}
+
+.status-processing {
+    background-color: #5bc0de;
+    color: white;
+}
+
+.status-completed {
+    background-color: #5cb85c;
+    color: white;
+}
+
+.status-failed {
+    background-color: #d9534f;
+    color: white;
+}
+
+.progress {
+    height: 10px;
+    background-color: #f5f5f5;
+    border-radius: 5px;
+    overflow: hidden;
+}
+
+.progress-bar {
+    height: 100%;
+    background-color: #4CAF50;
+    transition: width 0.3s ease;
+}
+
+.action-button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 5px;
+    margin-right: 5px;
+    color: #333;
+}
+
+.action-button:disabled {
+    color: #ccc;
+    cursor: not-allowed;
+}
+
+.view-button:hover {
+    color: #5bc0de;
+}
+
+.download-button:hover {
+    color: #5cb85c;
+}
+
+.delete-button:hover {
+    color: #d9534f;
+}
+
+/* 消息提示样式 */
+.message {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 15px 20px;
+    border-radius: 5px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+    z-index: 1000;
+    opacity: 0;
+    transform: translateY(-20px);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.message.show {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.message.info {
+    background-color: #5bc0de;
+    color: white;
+}
+
+.message.success {
+    background-color: #5cb85c;
+    color: white;
+}
+
+.message.error {
+    background-color: #d9534f;
+    color: white;
+}
+
+/* 模态框 */
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    background-color: rgba(0, 0, 0, 0.4);
+}
+
+.modal-content {
+    background-color: #fefefe;
+    margin: 15% auto;
+    padding: 20px;
+    border: 1px solid #888;
+    width: 80%;
+    max-width: 600px;
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+}
+
+.close {
+    color: #aaa;
+    float: right;
+    font-size: 28px;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.close:hover,
+.close:focus {
+    color: black;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.info-section {
+    margin-bottom: 20px;
+    padding: 10px;
+    background-color: #f9f9f9;
+    border-radius: 5px;
+}
+
+.info-section h3 {
+    margin-top: 0;
+    color: #333;
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 5px;
+}
+
+/* 系统信息样式 */
+#systemInfoContent {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+}
+
+.info-item {
+    margin-bottom: 8px;
+}
+
+.info-label {
+    font-weight: bold;
+    margin-right: 5px;
+}
+
+.model-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    max-height: 150px;
+    overflow-y: auto;
+    border: 1px solid #ecf0f1;
+    padding: 5px;
+    border-radius: 4px;
+}
+
+.model-list li {
+    padding: 3px 5px;
+    font-size: 0.9em;
+}
+
+.model-list li:nth-child(odd) {
+    background-color: #f8f9fa;
+}
+
+/* 响应式设计 */
 @media (max-width: 768px) {
-    .btn-download {
-        min-width: auto;
+    .settings-panel {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 15px;
+    }
+
+    .config-options {
+        grid-template-columns: 1fr;
+    }
+
+    #systemInfoContent {
+        grid-template-columns: 1fr;
+    }
+
+    .modal-content {
+        width: 95%;
+        margin: 5% auto;
     }
 }
