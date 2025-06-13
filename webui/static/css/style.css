@@ -1,0 +1,87 @@
+/* Custom styles for PDF to Markdown Converter */
+
+body {
+    background-color: #f8f9fa;
+}
+
+.container {
+    max-width: 1000px;
+}
+
+.card {
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    border: none;
+}
+
+.card-header {
+    background-color: #f1f8ff;
+    border-bottom: 1px solid #e3f2fd;
+}
+
+.progress {
+    height: 20px;
+}
+
+.btn-download {
+    min-width: 100px;
+}
+
+.status-badge {
+    font-size: 0.85rem;
+    padding: 0.35em 0.65em;
+}
+
+.status-queued {
+    background-color: #6c757d;
+}
+
+.status-processing {
+    background-color: #0d6efd;
+}
+
+.status-completed {
+    background-color: #198754;
+}
+
+.status-failed {
+    background-color: #dc3545;
+}
+
+#upload-form {
+    border: 2px dashed #dee2e6;
+    padding: 20px;
+    border-radius: 5px;
+    background-color: #f8f9fa;
+    transition: all 0.3s ease;
+}
+
+#upload-form:hover {
+    border-color: #0d6efd;
+}
+
+.drag-active {
+    border-color: #0d6efd !important;
+    background-color: #e8f0fe !important;
+}
+
+.file-input-wrapper {
+    position: relative;
+    overflow: hidden;
+    display: inline-block;
+}
+
+.file-input-wrapper input[type=file] {
+    font-size: 100px;
+    position: absolute;
+    left: 0;
+    top: 0;
+    opacity: 0;
+    cursor: pointer;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .btn-download {
+        min-width: auto;
+    }
+}

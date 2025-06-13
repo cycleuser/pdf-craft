@@ -1,0 +1,5 @@
+flask==2.3.3
+werkzeug==2.3.7
+pdf-craft
+onnxruntime==1.21.0
+torch>=2.0.0
