@@ -37,6 +37,14 @@
                         <div class="mb-3">
                             <strong>GPU设备:</strong> <span id="cuda-device">检查中...</span>
                         </div>
+                        <div class="mb-3">
+                            <strong>批处理大小:</strong>
+                            <div class="d-flex align-items-center">
+                                <input type="number" id="batch-size" class="form-control form-control-sm" min="1" max="10" style="width: 70px;" aria-label="批处理大小" placeholder="5" title="设置同时处理的PDF文件数量">
+                                <button id="set-batch-size" class="btn btn-sm btn-outline-primary ms-2">设置</button>
+                            </div>
+                            <small class="text-muted">同时处理的PDF文件数量 (1-10)</small>
+                        </div>
                     </div>
                     <div class="col-md-6">
                         <div class="mb-3">
@@ -45,6 +53,10 @@
                         <div class="mb-3">
                             <strong>已加载模型:</strong>
                             <div id="model-files" class="small text-muted mt-1">检查中...</div>
+                        </div>
+                        <div class="mb-3">
+                            <strong>队列状态:</strong>
+                            <div id="queue-info" class="small text-muted mt-1">检查中...</div>
                         </div>
                     </div>
                 </div>
@@ -67,8 +79,16 @@
         </div>
 
         <div class="card">
-            <div class="card-header">
+            <div class="card-header d-flex justify-content-between align-items-center">
                 <h5>Conversion Jobs</h5>
+                <div class="btn-group btn-group-sm">
+                    <button class="btn btn-outline-secondary" id="refresh-jobs">
+                        <i class="bi bi-arrow-clockwise"></i> 刷新
+                    </button>
+                    <button class="btn btn-outline-danger" id="clear-completed">
+                        <i class="bi bi-trash"></i> 清除已完成
+                    </button>
+                </div>
             </div>
             <div class="card-body">
                 <div class="table-responsive">
@@ -123,6 +143,32 @@
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Download Options Modal -->
+    <div class="modal fade" id="downloadOptionsModal" tabindex="-1" aria-labelledby="downloadOptionsModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="downloadOptionsModalLabel">Download Options</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p>请选择下载格式：</p>
+                    <div class="d-grid gap-2">
+                        <button type="button" class="btn btn-outline-primary download-option" data-type="markdown">
+                            <i class="bi bi-markdown"></i> Markdown 格式 (包含图片)
+                        </button>
+                        <button type="button" class="btn btn-outline-primary download-option" data-type="word">
+                            <i class="bi bi-file-earmark-word"></i> Word 文档 (.docx)
+                        </button>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
                 </div>
             </div>
         </div>

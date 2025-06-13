@@ -3,3 +3,5 @@ werkzeug==2.3.7
 pdf-craft
 onnxruntime==1.21.0
 torch>=2.0.0
+python-docx>=0.8.11
+markdown>=3.4.0
