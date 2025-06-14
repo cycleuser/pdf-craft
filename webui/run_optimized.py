@@ -171,7 +171,7 @@ def setup_environment():
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='OCR性能优化启动器')
-    parser.add_argument('--host', default='127.0.0.1', help='服务器地址')
+    parser.add_argument('--host', default='0.0.0.0', help='服务器地址')
     parser.add_argument('--port', type=int, default=5000, help='服务器端口')
     parser.add_argument('--debug', action='store_true', help='启用调试模式')
     parser.add_argument('--no-auto-config', action='store_true', help='禁用自动配置')

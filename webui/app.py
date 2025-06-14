@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
 app.config['RESULTS_FOLDER'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'results')
-app.config['MODEL_DIR'] = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
+app.config['MODEL_DIR'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
 app.config['JOBS_FILE'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'jobs.pkl')
 app.config['ALLOWED_EXTENSIONS'] = {'pdf'}
 app.config['USE_GPU'] = False  # 默认使用CPU，可以在这里修改为True来使用GPU
@@ -193,37 +193,55 @@ class OptimizedProgressReporter:
 
 def get_optimal_device_config():
     """获取最优设备配置"""
+    # 首先检查是否启用了GPU
+    if not app.config.get('USE_GPU', False):
+        # 如果禁用GPU，直接返回CPU配置
+        cpu_count = os.cpu_count() or 1
+        return {
+            'device': 'cpu',
+            'batch_size': app.config.get('CPU_BATCH_SIZE', min(4, cpu_count)),
+            'cpu_count': cpu_count,
+            'mixed_precision': False
+        }
+    
     try:
         import torch
         if torch.cuda.is_available():
             gpu_count = torch.cuda.device_count()
             gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
             
-            # 根据GPU内存调整批处理大小
-            if gpu_memory >= 16:
-                batch_size = 16
-            elif gpu_memory >= 8:
-                batch_size = 8
-            elif gpu_memory >= 4:
-                batch_size = 4
+            # 根据GPU内存调整批处理大小，但优先使用配置的值
+            configured_batch_size = app.config.get('GPU_BATCH_SIZE')
+            if configured_batch_size:
+                batch_size = configured_batch_size
             else:
-                batch_size = 2
+                # 自动根据GPU内存调整
+                if gpu_memory >= 16:
+                    batch_size = 16
+                elif gpu_memory >= 8:
+                    batch_size = 8
+                elif gpu_memory >= 4:
+                    batch_size = 4
+                else:
+                    batch_size = 2
                 
             return {
                 'device': 'cuda',
                 'batch_size': batch_size,
                 'gpu_count': gpu_count,
                 'gpu_memory': gpu_memory,
-                'mixed_precision': app.config['ENABLE_MIXED_PRECISION']
+                'mixed_precision': app.config.get('ENABLE_MIXED_PRECISION', False)
             }
     except ImportError:
-        pass
+        logger.warning("PyTorch未安装，无法使用GPU")
+    except Exception as e:
+        logger.warning(f"GPU检测失败: {str(e)}")
     
     # CPU配置
     cpu_count = os.cpu_count() or 1
     return {
         'device': 'cpu',
-        'batch_size': min(4, cpu_count),
+        'batch_size': app.config.get('CPU_BATCH_SIZE', min(4, cpu_count)),
         'cpu_count': cpu_count,
         'mixed_precision': False
     }

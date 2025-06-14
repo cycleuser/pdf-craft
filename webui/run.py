@@ -10,6 +10,7 @@ import logging
 import subprocess
 from pathlib import Path
 from app import app
+from optimization_config import OptimizationConfigManager, auto_configure_optimization
 
 def check_gpu_availability():
     """检查GPU是否可用"""
@@ -91,13 +92,39 @@ if __name__ == "__main__":
     onnx_info = check_onnxruntime()
     print(f"ONNX Runtime: {onnx_info}")
 
-    # 设置默认设备
-    if gpu_available:
-        app.config['USE_GPU'] = True
-        print("已自动启用GPU加速")
-    else:
-        app.config['USE_GPU'] = False
-        print("使用CPU进行处理")
+    # 应用优化配置
+    print("\n🔧 应用性能优化配置...")
+    try:
+        optimal_config, recommendations = auto_configure_optimization()
+        
+        # 应用优化配置
+        app.config['USE_GPU'] = optimal_config.get('device') == 'cuda'
+        app.config['ENABLE_MULTIPROCESSING'] = optimal_config.get('enable_multiprocessing', False)
+        app.config['ENABLE_MIXED_PRECISION'] = optimal_config.get('enable_mixed_precision', False)
+        app.config['OPTIMIZE_MEMORY'] = optimal_config.get('optimize_memory', True)
+        app.config['PRELOAD_MODELS'] = optimal_config.get('preload_models', False)
+        app.config['PROCESS_POOL_SIZE'] = optimal_config.get('process_pool_size', 2)
+        app.config['GPU_BATCH_SIZE'] = optimal_config.get('gpu_batch_size', 4)
+        app.config['CPU_BATCH_SIZE'] = optimal_config.get('cpu_batch_size', 2)
+        app.config['MAX_WORKERS'] = optimal_config.get('max_workers', 4)
+        
+        print(f"✅ GPU加速: {'启用' if app.config['USE_GPU'] else '禁用'}")
+        print(f"✅ 多进程处理: {'启用' if app.config['ENABLE_MULTIPROCESSING'] else '禁用'}")
+        print(f"✅ 混合精度: {'启用' if app.config['ENABLE_MIXED_PRECISION'] else '禁用'}")
+        print(f"✅ 内存优化: {'启用' if app.config['OPTIMIZE_MEMORY'] else '禁用'}")
+        print(f"✅ 模型预加载: {'启用' if app.config['PRELOAD_MODELS'] else '禁用'}")
+        print(f"📊 性能等级: {recommendations['performance_tier']}")
+        print(f"📈 预期提升: {recommendations['estimated_speedup']}")
+        
+    except Exception as e:
+        logger.warning(f"优化配置应用失败，使用默认配置: {str(e)}")
+        # 设置默认设备
+        if gpu_available:
+            app.config['USE_GPU'] = True
+            print("已自动启用GPU加速")
+        else:
+            app.config['USE_GPU'] = False
+            print("使用CPU进行处理")
 
     # 检查模型
     model_status = check_models()
