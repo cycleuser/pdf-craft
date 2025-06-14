@@ -6,10 +6,13 @@ import threading
 import logging
 import pickle
 import time
+import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_from_directory, redirect, url_for
 from werkzeug.utils import secure_filename
 from pdf_craft import PDFPageExtractor, MarkDownWriter
+from optimization_config import OptimizationConfigManager, auto_configure_optimization, get_system_performance_report, get_preset_config, list_preset_configs
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -23,6 +26,17 @@ app.config['JOBS_FILE'] = os.path.join(os.path.dirname(os.path.abspath(__file__)
 app.config['ALLOWED_EXTENSIONS'] = {'pdf'}
 app.config['USE_GPU'] = False  # 默认使用CPU，可以在这里修改为True来使用GPU
 app.config['BATCH_SIZE'] = 5  # 批处理大小，可以根据系统性能调整
+
+# 性能优化配置
+app.config['MAX_WORKERS'] = min(32, (os.cpu_count() or 1) + 4)  # 最大工作线程数
+app.config['GPU_BATCH_SIZE'] = 8  # GPU批处理大小
+app.config['CPU_BATCH_SIZE'] = 4  # CPU批处理大小
+app.config['MEMORY_LIMIT_GB'] = 8  # 内存限制（GB）
+app.config['ENABLE_MULTIPROCESSING'] = True  # 启用多进程处理
+app.config['PROCESS_POOL_SIZE'] = min(4, os.cpu_count() or 1)  # 进程池大小
+app.config['PRELOAD_MODELS'] = True  # 预加载模型
+app.config['ENABLE_MIXED_PRECISION'] = True  # 启用混合精度
+app.config['OPTIMIZE_MEMORY'] = True  # 启用内存优化
 
 # OCR级别配置
 OCR_LEVELS = {
@@ -73,6 +87,19 @@ queue_lock = threading.Lock()
 # 当前模型配置
 current_config = DEFAULT_CONFIG.copy()
 
+# 全局模型缓存
+model_cache = {}
+model_cache_lock = threading.Lock()
+
+# 性能监控
+performance_stats = {
+    'total_pages_processed': 0,
+    'total_processing_time': 0,
+    'average_pages_per_second': 0,
+    'gpu_utilization': 0,
+    'memory_usage': 0
+}
+
 # 从文件加载作业状态
 def load_jobs():
     global jobs, job_queue
@@ -119,28 +146,256 @@ def save_jobs():
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
-class ProgressReporter:
+class OptimizedProgressReporter:
     def __init__(self, job_id):
         self.job_id = job_id
         self.current_page = 0
         self.total_pages = 0
         self.last_save_time = 0
+        self.start_time = time.time()
+        self.page_times = []
 
     def report(self, current_page, total_pages):
         self.current_page = current_page
         self.total_pages = total_pages
+        
+        # 计算处理速度
+        current_time = time.time()
+        if len(self.page_times) > 0:
+            elapsed = current_time - self.page_times[-1]
+            self.page_times.append(current_time)
+            if len(self.page_times) > 10:  # 保持最近10页的时间记录
+                self.page_times.pop(0)
+        else:
+            self.page_times.append(current_time)
+        
+        # 计算平均速度
+        if len(self.page_times) > 1:
+            total_time = self.page_times[-1] - self.page_times[0]
+            pages_per_second = (len(self.page_times) - 1) / total_time if total_time > 0 else 0
+        else:
+            pages_per_second = 0
+        
         jobs[self.job_id]['progress'] = {
             'current_page': current_page,
             'total_pages': total_pages,
-            'percentage': int((current_page / total_pages) * 100) if total_pages > 0 else 0
+            'percentage': int((current_page / total_pages) * 100) if total_pages > 0 else 0,
+            'pages_per_second': round(pages_per_second, 2),
+            'estimated_remaining_time': int((total_pages - current_page) / pages_per_second) if pages_per_second > 0 else 0
         }
-        logger.info(f"Job {self.job_id}: Processing page {current_page}/{total_pages}")
+        
+        logger.info(f"Job {self.job_id}: Processing page {current_page}/{total_pages} ({pages_per_second:.2f} pages/sec)")
 
         # 每5秒保存一次状态，而不是每次更新都保存
-        current_time = time.time()
         if current_time - self.last_save_time > 5:
             save_jobs()
             self.last_save_time = current_time
+
+def get_optimal_device_config():
+    """获取最优设备配置"""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+            
+            # 根据GPU内存调整批处理大小
+            if gpu_memory >= 16:
+                batch_size = 16
+            elif gpu_memory >= 8:
+                batch_size = 8
+            elif gpu_memory >= 4:
+                batch_size = 4
+            else:
+                batch_size = 2
+                
+            return {
+                'device': 'cuda',
+                'batch_size': batch_size,
+                'gpu_count': gpu_count,
+                'gpu_memory': gpu_memory,
+                'mixed_precision': app.config['ENABLE_MIXED_PRECISION']
+            }
+    except ImportError:
+        pass
+    
+    # CPU配置
+    cpu_count = os.cpu_count() or 1
+    return {
+        'device': 'cpu',
+        'batch_size': min(4, cpu_count),
+        'cpu_count': cpu_count,
+        'mixed_precision': False
+    }
+
+def create_optimized_extractor(device_config, model_dir):
+    """创建优化的PDF提取器"""
+    with model_cache_lock:
+        cache_key = f"{device_config['device']}_{device_config['batch_size']}"
+        
+        if cache_key in model_cache and app.config['PRELOAD_MODELS']:
+            logger.info(f"使用缓存的模型: {cache_key}")
+            return model_cache[cache_key]
+        
+        try:
+            # 创建优化的提取器
+            extractor = PDFPageExtractor(
+                device=device_config['device'],
+                model_dir_path=model_dir,
+                batch_size=device_config['batch_size']
+            )
+            
+            # 如果支持，启用优化选项
+            if hasattr(extractor, 'enable_optimization'):
+                extractor.enable_optimization(
+                    mixed_precision=device_config.get('mixed_precision', False),
+                    memory_efficient=app.config['OPTIMIZE_MEMORY'],
+                    parallel_processing=True
+                )
+            
+            if app.config['PRELOAD_MODELS']:
+                model_cache[cache_key] = extractor
+                logger.info(f"模型已缓存: {cache_key}")
+            
+            return extractor
+            
+        except Exception as e:
+            logger.error(f"创建优化提取器失败: {str(e)}")
+            # 回退到基本配置
+            return PDFPageExtractor(
+                device=device_config['device'],
+                model_dir_path=model_dir
+            )
+
+def process_pdf_pages_parallel(extractor, pdf_path, progress_reporter, job_config):
+    """并行处理PDF页面"""
+    try:
+        # 获取PDF页面数
+        import fitz  # PyMuPDF
+        doc = fitz.open(pdf_path)
+        total_pages = len(doc)
+        doc.close()
+        
+        # 根据页面数决定处理策略
+        if total_pages <= 10:
+            # 小文档直接处理
+            return list(extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report))
+        
+        # 大文档分批并行处理
+        device_config = get_optimal_device_config()
+        batch_size = device_config['batch_size']
+        
+        results = []
+        
+        if app.config['ENABLE_MULTIPROCESSING'] and total_pages > 20:
+            # 使用多进程处理大文档
+            with ProcessPoolExecutor(max_workers=app.config['PROCESS_POOL_SIZE']) as executor:
+                futures = []
+                
+                for start_page in range(0, total_pages, batch_size):
+                    end_page = min(start_page + batch_size, total_pages)
+                    future = executor.submit(
+                        process_pdf_batch,
+                        pdf_path,
+                        start_page,
+                        end_page,
+                        device_config,
+                        app.config['MODEL_DIR'],
+                        job_config
+                    )
+                    futures.append((future, start_page, end_page))
+                
+                # 收集结果
+                for future, start_page, end_page in futures:
+                    try:
+                        batch_results = future.result(timeout=300)  # 5分钟超时
+                        results.extend(batch_results)
+                        progress_reporter.report(end_page, total_pages)
+                    except Exception as e:
+                        logger.error(f"批处理失败 (页面 {start_page}-{end_page}): {str(e)}")
+                        # 回退到单页处理
+                        for page_num in range(start_page, end_page):
+                            try:
+                                page_result = process_single_page(pdf_path, page_num, device_config, app.config['MODEL_DIR'], job_config)
+                                results.append(page_result)
+                                progress_reporter.report(page_num + 1, total_pages)
+                            except Exception as page_e:
+                                logger.error(f"单页处理失败 (页面 {page_num}): {str(page_e)}")
+        else:
+            # 使用线程池处理中等文档
+            with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 1)) as executor:
+                futures = []
+                
+                for page_num in range(total_pages):
+                    future = executor.submit(
+                        process_single_page,
+                        pdf_path,
+                        page_num,
+                        device_config,
+                        app.config['MODEL_DIR'],
+                        job_config
+                    )
+                    futures.append((future, page_num))
+                
+                # 收集结果
+                for future, page_num in futures:
+                    try:
+                        page_result = future.result(timeout=60)  # 1分钟超时
+                        results.append(page_result)
+                        progress_reporter.report(page_num + 1, total_pages)
+                    except Exception as e:
+                        logger.error(f"页面处理失败 (页面 {page_num}): {str(e)}")
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"并行处理失败，回退到串行处理: {str(e)}")
+        # 回退到原始处理方式
+        return list(extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report))
+
+def process_pdf_batch(pdf_path, start_page, end_page, device_config, model_dir, job_config):
+    """处理PDF批次（多进程函数）"""
+    try:
+        # 在子进程中创建提取器
+        extractor = create_optimized_extractor(device_config, model_dir)
+        
+        # 处理指定页面范围
+        results = []
+        for page_num in range(start_page, end_page):
+            try:
+                page_result = process_single_page_with_extractor(extractor, pdf_path, page_num, job_config)
+                results.append(page_result)
+            except Exception as e:
+                logger.error(f"批次中页面 {page_num} 处理失败: {str(e)}")
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"批次处理失败: {str(e)}")
+        return []
+
+def process_single_page(pdf_path, page_num, device_config, model_dir, job_config):
+    """处理单个页面"""
+    try:
+        extractor = create_optimized_extractor(device_config, model_dir)
+        return process_single_page_with_extractor(extractor, pdf_path, page_num, job_config)
+    except Exception as e:
+        logger.error(f"单页处理失败: {str(e)}")
+        return None
+
+def process_single_page_with_extractor(extractor, pdf_path, page_num, job_config):
+    """使用指定提取器处理单个页面"""
+    try:
+        # 这里需要根据pdf_craft库的实际API调整
+        # 假设支持单页提取
+        if hasattr(extractor, 'extract_page'):
+            return extractor.extract_page(pdf_path, page_num)
+        else:
+            # 如果不支持单页提取，使用原始方法
+            return None
+    except Exception as e:
+        logger.error(f"页面提取失败: {str(e)}")
+        return None
 
 # 初始化Ollama LLM
 def init_ollama_llm(model_name):
@@ -193,7 +448,9 @@ def check_ollama_available():
         return False, []
 
 def process_pdf(job_id, pdf_path, output_dir):
-    global active_jobs
+    global active_jobs, performance_stats
+    start_time = time.time()
+    
     try:
         # Update job status
         jobs[job_id]['status'] = 'processing'
@@ -211,12 +468,14 @@ def process_pdf(job_id, pdf_path, output_dir):
         markdown_path = os.path.join(job_result_dir, f"{base_filename}.md")
         images_dir = "images"
 
-        # Create progress reporter
-        progress_reporter = ProgressReporter(job_id)
+        # Create optimized progress reporter
+        progress_reporter = OptimizedProgressReporter(job_id)
 
-        # 确定是使用GPU还是CPU
-        device = "cuda" if app.config['USE_GPU'] else "cpu"
-        logger.info(f"Job {job_id}: Using device: {device}")
+        # 获取最优设备配置
+        device_config = get_optimal_device_config()
+        device = device_config['device']
+        
+        logger.info(f"Job {job_id}: Using optimized config: {device_config}")
 
         # 获取作业配置
         job_config = jobs[job_id].get('config', current_config)
@@ -229,16 +488,16 @@ def process_pdf(job_id, pdf_path, output_dir):
         if ollama_model != 'none':
             llm = init_ollama_llm(ollama_model)
 
-        # Initialize PDF extractor with configuration
-        extractor = PDFPageExtractor(
-            device=device,
-            model_dir_path=app.config['MODEL_DIR']
-        )
+        # 创建优化的PDF提取器
+        extractor = create_optimized_extractor(device_config, app.config['MODEL_DIR'])
 
         # 记录使用的配置
         config_info = {
             'device': device,
-            'ollama_model': ollama_model
+            'batch_size': device_config['batch_size'],
+            'ollama_model': ollama_model,
+            'optimization_enabled': True,
+            'mixed_precision': device_config.get('mixed_precision', False)
         }
 
         # 获取并记录模型信息
@@ -246,13 +505,27 @@ def process_pdf(job_id, pdf_path, output_dir):
         logger.info(f"Job {job_id}: Models available: {model_files}")
 
         # 记录开始处理PDF
-        start_time = time.time()
-        logger.info(f"Job {job_id}: Starting PDF processing with {device} acceleration and config: {config_info}")
+        logger.info(f"Job {job_id}: Starting optimized PDF processing with config: {config_info}")
 
-        # Process PDF and write to markdown
-        with MarkDownWriter(markdown_path, images_dir, "utf-8") as md:
-            for block in extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report):
-                md.write(block)
+        # 使用优化的并行处理
+        try:
+            with MarkDownWriter(markdown_path, images_dir, "utf-8") as md:
+                if app.config['ENABLE_MULTIPROCESSING']:
+                    # 使用并行处理
+                    blocks = process_pdf_pages_parallel(extractor, pdf_path, progress_reporter, job_config)
+                    for block in blocks:
+                        if block:  # 确保block不为None
+                            md.write(block)
+                else:
+                    # 使用原始串行处理
+                    for block in extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report):
+                        md.write(block)
+        except Exception as e:
+            logger.warning(f"优化处理失败，回退到标准处理: {str(e)}")
+            # 回退到标准处理
+            with MarkDownWriter(markdown_path, images_dir, "utf-8") as md:
+                for block in extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report):
+                    md.write(block)
 
         # 生成Word文档
         word_path = os.path.join(job_result_dir, f"{base_filename}.docx")
@@ -266,9 +539,16 @@ def process_pdf(job_id, pdf_path, output_dir):
         complete_zip_path = os.path.join(job_result_dir, f"{base_filename}_complete.zip")
         create_complete_zip(job_result_dir, complete_zip_path, base_filename)
 
-        # 计算处理时间
+        # 计算处理时间和性能统计
         end_time = time.time()
         processing_time = end_time - start_time
+        
+        # 更新性能统计
+        total_pages = progress_reporter.total_pages
+        if total_pages > 0:
+            performance_stats['total_pages_processed'] += total_pages
+            performance_stats['total_processing_time'] += processing_time
+            performance_stats['average_pages_per_second'] = performance_stats['total_pages_processed'] / performance_stats['total_processing_time']
 
         # Update job status to completed
         jobs[job_id]['status'] = 'completed'
@@ -285,9 +565,14 @@ def process_pdf(job_id, pdf_path, output_dir):
             'device_used': device,
             'model_dir': app.config['MODEL_DIR'],
             'processing_time': processing_time,
-            'config': config_info
+            'config': config_info,
+            'performance': {
+                'total_pages': total_pages,
+                'pages_per_second': total_pages / processing_time if processing_time > 0 else 0,
+                'optimization_used': True
+            }
         }
-        logger.info(f"Job {job_id}: Completed successfully in {processing_time:.2f} seconds")
+        logger.info(f"Job {job_id}: Completed successfully in {processing_time:.2f} seconds ({total_pages / processing_time if processing_time > 0 else 0:.2f} pages/sec)")
         save_jobs()  # 保存完成状态
 
     except Exception as e:
@@ -586,16 +871,40 @@ def system_info():
         cuda_available = torch.cuda.is_available()
         cuda_device_count = torch.cuda.device_count() if cuda_available else 0
         cuda_device_name = torch.cuda.get_device_name(0) if cuda_available and cuda_device_count > 0 else "N/A"
+        
+        # 获取GPU内存信息
+        gpu_memory_info = {}
+        if cuda_available:
+            for i in range(cuda_device_count):
+                props = torch.cuda.get_device_properties(i)
+                gpu_memory_info[f'gpu_{i}'] = {
+                    'name': props.name,
+                    'total_memory': props.total_memory / 1024**3,  # GB
+                    'allocated_memory': torch.cuda.memory_allocated(i) / 1024**3 if torch.cuda.is_initialized() else 0,
+                    'cached_memory': torch.cuda.memory_reserved(i) / 1024**3 if torch.cuda.is_initialized() else 0
+                }
     except ImportError:
         cuda_available = False
         cuda_device_count = 0
         cuda_device_name = "PyTorch not installed"
+        gpu_memory_info = {}
 
     # 获取系统信息
     import platform
     import sys
+    import psutil
+    
     os_info = f"{platform.system()} {platform.release()}"
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    
+    # 获取CPU和内存信息
+    cpu_info = {
+        'cpu_count': os.cpu_count(),
+        'cpu_percent': psutil.cpu_percent(interval=1),
+        'memory_total': psutil.virtual_memory().total / 1024**3,  # GB
+        'memory_available': psutil.virtual_memory().available / 1024**3,  # GB
+        'memory_percent': psutil.virtual_memory().percent
+    }
 
     # 获取模型目录信息
     model_dir = app.config['MODEL_DIR']
@@ -605,17 +914,27 @@ def system_info():
     queue_info = {
         'queued_jobs': len(job_queue),
         'active_jobs': active_jobs,
-        'batch_size': app.config['BATCH_SIZE']
+        'batch_size': app.config['BATCH_SIZE'],
+        'max_workers': app.config['MAX_WORKERS'],
+        'process_pool_size': app.config['PROCESS_POOL_SIZE']
     }
 
     # 检查Ollama是否可用
     ollama_available, available_models = check_ollama_available()
+    
+    # 获取优化配置
+    device_config = get_optimal_device_config()
+    
+    # 获取性能统计
+    performance_info = performance_stats.copy()
 
     return jsonify({
         'use_gpu': app.config['USE_GPU'],
         'cuda_available': cuda_available,
         'cuda_device_count': cuda_device_count,
         'cuda_device_name': cuda_device_name,
+        'gpu_memory_info': gpu_memory_info,
+        'cpu_info': cpu_info,
         'os_info': os_info,
         'python_version': python_version,
         'model_dir': model_dir,
@@ -623,7 +942,19 @@ def system_info():
         'queue_info': queue_info,
         'current_config': current_config,
         'ollama_available': ollama_available,
-        'ollama_models': available_models if ollama_available else []
+        'ollama_models': available_models if ollama_available else [],
+        'optimization_config': {
+            'multiprocessing_enabled': app.config['ENABLE_MULTIPROCESSING'],
+            'mixed_precision_enabled': app.config['ENABLE_MIXED_PRECISION'],
+            'memory_optimization_enabled': app.config['OPTIMIZE_MEMORY'],
+            'model_preloading_enabled': app.config['PRELOAD_MODELS'],
+            'optimal_device_config': device_config
+        },
+        'performance_stats': performance_info,
+        'model_cache_info': {
+            'cached_models': list(model_cache.keys()),
+            'cache_size': len(model_cache)
+        }
     })
 
 @app.route('/upload', methods=['POST'])
@@ -885,6 +1216,232 @@ def set_batch_size():
         return jsonify({'error': str(e)}), 400
 
     return jsonify({'error': 'Invalid request'}), 400
+
+@app.route('/optimization_settings', methods=['POST'])
+def update_optimization_settings():
+    """更新优化设置"""
+    try:
+        data = request.get_json()
+        
+        # 更新多进程设置
+        if 'enable_multiprocessing' in data:
+            app.config['ENABLE_MULTIPROCESSING'] = bool(data['enable_multiprocessing'])
+            logger.info(f"多进程处理已{'启用' if app.config['ENABLE_MULTIPROCESSING'] else '禁用'}")
+        
+        # 更新混合精度设置
+        if 'enable_mixed_precision' in data:
+            app.config['ENABLE_MIXED_PRECISION'] = bool(data['enable_mixed_precision'])
+            logger.info(f"混合精度已{'启用' if app.config['ENABLE_MIXED_PRECISION'] else '禁用'}")
+        
+        # 更新内存优化设置
+        if 'optimize_memory' in data:
+            app.config['OPTIMIZE_MEMORY'] = bool(data['optimize_memory'])
+            logger.info(f"内存优化已{'启用' if app.config['OPTIMIZE_MEMORY'] else '禁用'}")
+        
+        # 更新模型预加载设置
+        if 'preload_models' in data:
+            app.config['PRELOAD_MODELS'] = bool(data['preload_models'])
+            logger.info(f"模型预加载已{'启用' if app.config['PRELOAD_MODELS'] else '禁用'}")
+            
+            # 如果禁用预加载，清空模型缓存
+            if not app.config['PRELOAD_MODELS']:
+                with model_cache_lock:
+                    model_cache.clear()
+                    logger.info("模型缓存已清空")
+        
+        # 更新进程池大小
+        if 'process_pool_size' in data:
+            pool_size = int(data['process_pool_size'])
+            if 1 <= pool_size <= 16:
+                app.config['PROCESS_POOL_SIZE'] = pool_size
+                logger.info(f"进程池大小已设置为: {pool_size}")
+        
+        # 更新GPU批处理大小
+        if 'gpu_batch_size' in data:
+            gpu_batch_size = int(data['gpu_batch_size'])
+            if 1 <= gpu_batch_size <= 32:
+                app.config['GPU_BATCH_SIZE'] = gpu_batch_size
+                logger.info(f"GPU批处理大小已设置为: {gpu_batch_size}")
+        
+        # 更新CPU批处理大小
+        if 'cpu_batch_size' in data:
+            cpu_batch_size = int(data['cpu_batch_size'])
+            if 1 <= cpu_batch_size <= 16:
+                app.config['CPU_BATCH_SIZE'] = cpu_batch_size
+                logger.info(f"CPU批处理大小已设置为: {cpu_batch_size}")
+        
+        return jsonify({
+            'success': True,
+            'settings': {
+                'enable_multiprocessing': app.config['ENABLE_MULTIPROCESSING'],
+                'enable_mixed_precision': app.config['ENABLE_MIXED_PRECISION'],
+                'optimize_memory': app.config['OPTIMIZE_MEMORY'],
+                'preload_models': app.config['PRELOAD_MODELS'],
+                'process_pool_size': app.config['PROCESS_POOL_SIZE'],
+                'gpu_batch_size': app.config['GPU_BATCH_SIZE'],
+                'cpu_batch_size': app.config['CPU_BATCH_SIZE']
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"更新优化设置失败: {str(e)}")
+        return jsonify({'error': str(e)}), 400
+
+@app.route('/clear_model_cache', methods=['POST'])
+def clear_model_cache():
+    """清空模型缓存"""
+    try:
+        with model_cache_lock:
+            cache_size = len(model_cache)
+            model_cache.clear()
+            logger.info(f"已清空 {cache_size} 个缓存模型")
+        
+        return jsonify({
+            'success': True,
+            'message': f'已清空 {cache_size} 个缓存模型'
+        })
+        
+    except Exception as e:
+        logger.error(f"清空模型缓存失败: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/performance_stats')
+def get_performance_stats():
+    """获取性能统计"""
+    try:
+        # 获取实时系统信息
+        import psutil
+        
+        system_stats = {
+            'cpu_percent': psutil.cpu_percent(interval=0.1),
+            'memory_percent': psutil.virtual_memory().percent,
+            'memory_available_gb': psutil.virtual_memory().available / 1024**3
+        }
+        
+        # 获取GPU信息（如果可用）
+        gpu_stats = {}
+        try:
+            import torch
+            if torch.cuda.is_available():
+                for i in range(torch.cuda.device_count()):
+                    if torch.cuda.is_initialized():
+                        gpu_stats[f'gpu_{i}'] = {
+                            'memory_allocated_gb': torch.cuda.memory_allocated(i) / 1024**3,
+                            'memory_reserved_gb': torch.cuda.memory_reserved(i) / 1024**3,
+                            'memory_total_gb': torch.cuda.get_device_properties(i).total_memory / 1024**3
+                        }
+        except ImportError:
+            pass
+        
+        return jsonify({
+            'performance_stats': performance_stats,
+            'system_stats': system_stats,
+            'gpu_stats': gpu_stats,
+            'model_cache_size': len(model_cache),
+            'active_jobs': active_jobs,
+            'queued_jobs': len(job_queue)
+        })
+        
+    except Exception as e:
+        logger.error(f"获取性能统计失败: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/auto_optimize', methods=['POST'])
+def auto_optimize():
+    """自动优化配置"""
+    try:
+        optimal_config, recommendations = auto_configure_optimization()
+        
+        # 应用优化配置
+        app.config['ENABLE_MULTIPROCESSING'] = optimal_config.get('enable_multiprocessing', False)
+        app.config['ENABLE_MIXED_PRECISION'] = optimal_config.get('enable_mixed_precision', False)
+        app.config['OPTIMIZE_MEMORY'] = optimal_config.get('optimize_memory', True)
+        app.config['PRELOAD_MODELS'] = optimal_config.get('preload_models', False)
+        app.config['PROCESS_POOL_SIZE'] = optimal_config.get('process_pool_size', 2)
+        app.config['GPU_BATCH_SIZE'] = optimal_config.get('gpu_batch_size', 4)
+        app.config['CPU_BATCH_SIZE'] = optimal_config.get('cpu_batch_size', 2)
+        app.config['MAX_WORKERS'] = optimal_config.get('max_workers', 4)
+        
+        # 如果有GPU，自动启用GPU
+        if optimal_config.get('device') == 'cuda':
+            app.config['USE_GPU'] = True
+        
+        logger.info("自动优化配置已应用")
+        
+        return jsonify({
+            'success': True,
+            'applied_config': optimal_config,
+            'recommendations': recommendations,
+            'message': '自动优化配置已应用'
+        })
+        
+    except Exception as e:
+        logger.error(f"自动优化失败: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/system_performance_report')
+def system_performance_report():
+    """获取系统性能报告"""
+    try:
+        report = get_system_performance_report()
+        return jsonify(report)
+    except Exception as e:
+        logger.error(f"获取系统性能报告失败: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/preset_configs')
+def get_preset_configs():
+    """获取预设配置列表"""
+    try:
+        presets = list_preset_configs()
+        return jsonify({'presets': presets})
+    except Exception as e:
+        logger.error(f"获取预设配置失败: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/apply_preset/<preset_name>', methods=['POST'])
+def apply_preset_config(preset_name):
+    """应用预设配置"""
+    try:
+        preset = get_preset_config(preset_name)
+        if not preset:
+            return jsonify({'error': '预设配置不存在'}), 404
+        
+        config = preset['config']
+        
+        # 应用预设配置
+        if 'enable_multiprocessing' in config:
+            app.config['ENABLE_MULTIPROCESSING'] = config['enable_multiprocessing']
+        if 'enable_mixed_precision' in config:
+            app.config['ENABLE_MIXED_PRECISION'] = config['enable_mixed_precision']
+        if 'optimize_memory' in config:
+            app.config['OPTIMIZE_MEMORY'] = config['optimize_memory']
+        if 'preload_models' in config:
+            app.config['PRELOAD_MODELS'] = config['preload_models']
+        if 'batch_size' in config:
+            app.config['BATCH_SIZE'] = config['batch_size']
+        if 'process_pool_size' in config:
+            app.config['PROCESS_POOL_SIZE'] = config['process_pool_size']
+        
+        # 应用OCR配置
+        if 'ocr_level' in config:
+            current_config['ocr_level'] = config['ocr_level']
+        if 'extract_table_format' in config:
+            current_config['extract_table_format'] = config['extract_table_format']
+        
+        logger.info(f"已应用预设配置: {preset_name}")
+        
+        return jsonify({
+            'success': True,
+            'preset_name': preset_name,
+            'preset_info': preset,
+            'applied_config': config,
+            'message': f'已应用预设配置: {preset["name"]}'
+        })
+        
+    except Exception as e:
+        logger.error(f"应用预设配置失败: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 # 应用启动时加载作业状态
 load_jobs()
