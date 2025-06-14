@@ -167,6 +167,45 @@
                         </div>
                         <div class="card-body">
                             <div class="form-group">
+                                <label for="ocr-engine">OCR引擎</label>
+                                <select class="form-control" id="ocr-engine">
+                                    {% for key, engine in ocr_engines.items() %}
+                                    <option value="{{ key }}" 
+                                            {% if current_config.ocr_engine == key %}selected{% endif %}
+                                            {% if available_ocr_engines.get(key, {}).get('available', False) == False %}disabled{% endif %}>
+                                        {{ engine.name }}
+                                        {% if available_ocr_engines.get(key, {}).get('available', False) == False %}(不可用){% endif %}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                                <small class="form-text text-muted" id="ocr-engine-description">
+                                    {{ ocr_engines[current_config.ocr_engine].description }}
+                                </small>
+                                <div class="mt-2">
+                                    <button class="btn btn-sm btn-outline-info" id="benchmark-ocr">
+                                        <i class="fas fa-chart-bar"></i> 性能对比
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" id="refresh-engines">
+                                        <i class="fas fa-sync"></i> 刷新引擎
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="ocr-language">识别语言</label>
+                                <select class="form-control" id="ocr-language">
+                                    {% for key, lang in ocr_languages.items() %}
+                                    <option value="{{ key }}" {% if current_config.ocr_language == key %}selected{% endif %}>
+                                        {{ lang.name }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                                <small class="form-text text-muted" id="ocr-language-description">
+                                    {{ ocr_languages[current_config.ocr_language].description }}
+                                </small>
+                            </div>
+
+                            <div class="form-group">
                                 <label for="ocr-level">OCR级别</label>
                                 <select class="form-control" id="ocr-level">
                                     {% for key, level in ocr_levels.items() %}
@@ -347,6 +386,29 @@
             <div class="popup-footer">
                 <button type="button" class="btn btn-secondary" id="cancelRunMode">取消</button>
                 <button type="button" class="btn btn-primary" id="apply-mode">应用</button>
+            </div>
+        </div>
+        <div class="popup-backdrop"></div>
+    </div>
+
+    <!-- OCR引擎性能对比弹出层 -->
+    <div id="ocrBenchmarkPopup" class="system-info-popup" style="display: none;">
+        <div class="popup-content" style="width: 800px;">
+            <div class="popup-header">
+                <h5><i class="fas fa-chart-bar"></i> OCR引擎性能对比</h5>
+                <button type="button" class="popup-close" id="closeBenchmark">&times;</button>
+            </div>
+            <div class="popup-body" id="benchmarkContent">
+                <div class="text-center">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="sr-only">测试中...</span>
+                    </div>
+                    <p class="mt-2">正在测试各OCR引擎性能，请稍候...</p>
+                </div>
+            </div>
+            <div class="popup-footer">
+                <button type="button" class="btn btn-secondary" id="closeBenchmarkBtn">关闭</button>
+                <button type="button" class="btn btn-primary" id="runBenchmark">重新测试</button>
             </div>
         </div>
         <div class="popup-backdrop"></div>

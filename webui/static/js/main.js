@@ -1,4 +1,4 @@
-// PDF OCR 智能处理平台 - 主要JavaScript文件
+// 基于光学字符识别和本地大语言模型的文档转换平台- 主要JavaScript文件
 
 // 等待jQuery和Bootstrap都加载完成
 $(document).ready(function() {
@@ -173,7 +173,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
             if (useCustomConfig && useCustomConfig.checked) {
                 formData.append('use_custom_config', 'true');
+                formData.append('ocr_engine', ocrEngineSelect ? ocrEngineSelect.value : 'pdf_craft');
                 formData.append('ocr_level', ocrLevelSelect.value);
+                formData.append('ocr_language', ocrLanguageSelect ? ocrLanguageSelect.value : 'auto');
                 formData.append('extract_table_format', tableFormatSelect.value);
                 formData.append('extract_formula', extractFormulaCheckbox.checked);
                 formData.append('ollama_model', ollamaModelSelect.value);
@@ -428,11 +430,254 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    // OCR引擎选择变化事件
+    const ocrEngineSelect = document.getElementById('ocr-engine');
+    const ocrLanguageSelect = document.getElementById('ocr-language');
+    
+    if (ocrEngineSelect) {
+        ocrEngineSelect.addEventListener('change', function() {
+            const descriptions = {
+                'pdf_craft': '原始PDF-Craft引擎，支持复杂文档结构',
+                'tesseract': 'Google Tesseract OCR，支持100+语言',
+                'easyocr': '高精度深度学习OCR，支持80+语言',
+                'paddleocr': '百度PaddleOCR，中文识别效果优秀',
+                'rapidocr': '轻量级高速OCR，基于ONNX Runtime'
+            };
+            const descElement = document.getElementById('ocr-engine-description');
+            if (descElement) {
+                descElement.textContent = descriptions[this.value] || '';
+            }
+        });
+    }
+
+    if (ocrLanguageSelect) {
+        ocrLanguageSelect.addEventListener('change', function() {
+            const descriptions = {
+                'auto': '自动检测文档语言',
+                'chinese': '简体中文和繁体中文',
+                'english': '英语文档',
+                'japanese': '日语文档',
+                'korean': '韩语文档',
+                'french': '法语文档',
+                'german': '德语文档',
+                'spanish': '西班牙语文档',
+                'russian': '俄语文档',
+                'arabic': '阿拉伯语文档'
+            };
+            const descElement = document.getElementById('ocr-language-description');
+            if (descElement) {
+                descElement.textContent = descriptions[this.value] || '';
+            }
+        });
+    }
+
+    // OCR引擎性能对比
+    const benchmarkOcrBtn = document.getElementById('benchmark-ocr');
+    if (benchmarkOcrBtn) {
+        benchmarkOcrBtn.addEventListener('click', function() {
+            showOcrBenchmarkPopup();
+        });
+    }
+
+    // 刷新OCR引擎
+    const refreshEnginesBtn = document.getElementById('refresh-engines');
+    if (refreshEnginesBtn) {
+        refreshEnginesBtn.addEventListener('click', function() {
+            refreshOcrEngines();
+        });
+    }
+
+    // 显示OCR性能对比弹出层
+    function showOcrBenchmarkPopup() {
+        const popup = document.getElementById('ocrBenchmarkPopup');
+        if (popup) {
+            popup.style.display = 'flex';
+            runOcrBenchmark();
+        }
+    }
+
+    // 关闭OCR性能对比弹出层
+    function closeOcrBenchmarkPopup() {
+        const popup = document.getElementById('ocrBenchmarkPopup');
+        if (popup) {
+            popup.style.display = 'none';
+        }
+    }
+
+    // 绑定OCR性能对比关闭事件
+    const closeBenchmarkBtn = document.getElementById('closeBenchmark');
+    const closeBenchmarkFooterBtn = document.getElementById('closeBenchmarkBtn');
+    const runBenchmarkBtn = document.getElementById('runBenchmark');
+    const benchmarkBackdrop = document.querySelector('#ocrBenchmarkPopup .popup-backdrop');
+
+    if (closeBenchmarkBtn) {
+        closeBenchmarkBtn.addEventListener('click', closeOcrBenchmarkPopup);
+    }
+    if (closeBenchmarkFooterBtn) {
+        closeBenchmarkFooterBtn.addEventListener('click', closeOcrBenchmarkPopup);
+    }
+    if (runBenchmarkBtn) {
+        runBenchmarkBtn.addEventListener('click', runOcrBenchmark);
+    }
+    if (benchmarkBackdrop) {
+        benchmarkBackdrop.addEventListener('click', closeOcrBenchmarkPopup);
+    }
+
+    // 运行OCR性能测试
+    function runOcrBenchmark() {
+        const benchmarkContent = document.getElementById('benchmarkContent');
+        if (!benchmarkContent) return;
+
+        // 显示加载中
+        benchmarkContent.innerHTML = `
+            <div class="text-center">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="sr-only">测试中...</span>
+                </div>
+                <p class="mt-2">正在测试各OCR引擎性能，请稍候...</p>
+            </div>
+        `;
+
+        // 获取第一个已上传的文件作为测试文件
+        const firstJob = Object.values(jobs || {}).find(job => job.file_path);
+        const testFile = firstJob ? firstJob.file_path : null;
+
+        if (!testFile) {
+            benchmarkContent.innerHTML = `
+                <div class="alert alert-warning">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    需要先上传一个PDF文件才能进行性能测试
+                </div>
+            `;
+            return;
+        }
+
+        fetch('/benchmark_ocr', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ test_file: testFile })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.benchmark_results) {
+                displayBenchmarkResults(data.benchmark_results);
+            } else {
+                benchmarkContent.innerHTML = `
+                    <div class="alert alert-danger">
+                        <i class="fas fa-times-circle"></i>
+                        性能测试失败: ${data.error || '未知错误'}
+                    </div>
+                `;
+            }
+        })
+        .catch(error => {
+            console.error('OCR性能测试失败:', error);
+            benchmarkContent.innerHTML = `
+                <div class="alert alert-danger">
+                    <i class="fas fa-times-circle"></i>
+                    性能测试出错: ${error.message}
+                </div>
+            `;
+        });
+    }
+
+    // 显示性能测试结果
+    function displayBenchmarkResults(results) {
+        const benchmarkContent = document.getElementById('benchmarkContent');
+        if (!benchmarkContent) return;
+
+        let html = '<div class="table-responsive">';
+        html += '<table class="table table-striped">';
+        html += '<thead><tr><th>OCR引擎</th><th>状态</th><th>处理速度</th><th>平均页面时间</th><th>字符数</th><th>字符/秒</th></tr></thead>';
+        html += '<tbody>';
+
+        for (const [engineName, result] of Object.entries(results)) {
+            html += '<tr>';
+            html += `<td><strong>${engineName}</strong></td>`;
+            
+            if (result.available) {
+                html += '<td><span class="badge badge-success">可用</span></td>';
+                html += `<td>${result.pages_per_second ? result.pages_per_second.toFixed(2) + ' 页/秒' : '未知'}</td>`;
+                html += `<td>${result.avg_page_time ? result.avg_page_time.toFixed(2) + ' 秒' : '未知'}</td>`;
+                html += `<td>${result.total_text_length || 0}</td>`;
+                html += `<td>${result.chars_per_second ? result.chars_per_second.toFixed(0) : '0'}</td>`;
+            } else {
+                html += '<td><span class="badge badge-danger">不可用</span></td>';
+                html += `<td colspan="4"><small class="text-muted">${result.error || '引擎不可用'}</small></td>`;
+            }
+            
+            html += '</tr>';
+        }
+
+        html += '</tbody></table></div>';
+
+        // 添加推荐
+        const availableResults = Object.entries(results).filter(([_, result]) => result.available);
+        if (availableResults.length > 0) {
+            const fastest = availableResults.reduce((prev, curr) => 
+                (curr[1].pages_per_second || 0) > (prev[1].pages_per_second || 0) ? curr : prev
+            );
+            
+            html += `
+                <div class="alert alert-info mt-3">
+                    <i class="fas fa-lightbulb"></i>
+                    <strong>推荐:</strong> ${fastest[0]} 引擎在此测试中表现最佳 
+                    (${fastest[1].pages_per_second ? fastest[1].pages_per_second.toFixed(2) + ' 页/秒' : ''})
+                </div>
+            `;
+        }
+
+        benchmarkContent.innerHTML = html;
+    }
+
+    // 刷新OCR引擎
+    function refreshOcrEngines() {
+        fetch('/ocr_engines')
+        .then(response => response.json())
+        .then(data => {
+            if (data.engines) {
+                updateOcrEngineOptions(data.engines);
+                showMessage('OCR引擎列表已刷新', 'success');
+            } else {
+                showMessage(`刷新失败: ${data.error}`, 'error');
+            }
+        })
+        .catch(error => {
+            showMessage(`刷新出错: ${error.message}`, 'error');
+        });
+    }
+
+    // 更新OCR引擎选项
+    function updateOcrEngineOptions(engines) {
+        if (!ocrEngineSelect) return;
+
+        // 保存当前选择
+        const currentValue = ocrEngineSelect.value;
+        
+        // 清空并重新填充选项
+        ocrEngineSelect.innerHTML = '';
+        
+        for (const [key, engine] of Object.entries(engines)) {
+            const option = document.createElement('option');
+            option.value = key;
+            option.textContent = engine.name + (engine.available ? '' : ' (不可用)');
+            option.disabled = !engine.available;
+            
+            if (key === currentValue) {
+                option.selected = true;
+            }
+            
+            ocrEngineSelect.appendChild(option);
+        }
+    }
+
     // 保存配置
     if (saveConfigBtn) {
         saveConfigBtn.addEventListener('click', function() {
             const config = {
+                ocr_engine: ocrEngineSelect ? ocrEngineSelect.value : 'pdf_craft',
                 ocr_level: ocrLevelSelect.value,
+                ocr_language: ocrLanguageSelect ? ocrLanguageSelect.value : 'auto',
                 extract_table_format: tableFormatSelect.value,
                 extract_formula: extractFormulaCheckbox.checked,
                 ollama_model: ollamaModelSelect.value

@@ -13,6 +13,7 @@ from flask import Flask, render_template, request, jsonify, send_from_directory,
 from werkzeug.utils import secure_filename
 from pdf_craft import PDFPageExtractor, MarkDownWriter
 from optimization_config import OptimizationConfigManager, auto_configure_optimization, get_system_performance_report, get_preset_config, list_preset_configs
+from ocr_engines import OCREngineManager
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -24,7 +25,7 @@ app.config['RESULTS_FOLDER'] = os.path.join(os.path.dirname(os.path.abspath(__fi
 app.config['MODEL_DIR'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
 app.config['JOBS_FILE'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'jobs.pkl')
 app.config['ALLOWED_EXTENSIONS'] = {'pdf'}
-app.config['USE_GPU'] = False  # 默认使用CPU，可以在这里修改为True来使用GPU
+app.config['USE_GPU'] = True # 默认使用CPU，可以在这里修改为True来使用GPU
 app.config['BATCH_SIZE'] = 5  # 批处理大小，可以根据系统性能调整
 
 # 性能优化配置
@@ -38,12 +39,35 @@ app.config['PRELOAD_MODELS'] = True  # 预加载模型
 app.config['ENABLE_MIXED_PRECISION'] = True  # 启用混合精度
 app.config['OPTIMIZE_MEMORY'] = True  # 启用内存优化
 
+# OCR引擎配置
+OCR_ENGINES = {
+    'pdf_craft': {'name': 'PDF-Craft', 'description': '原始PDF-Craft引擎，支持复杂文档结构'},
+    'tesseract': {'name': 'Tesseract', 'description': 'Google Tesseract OCR，支持100+语言'},
+    'easyocr': {'name': 'EasyOCR', 'description': '高精度深度学习OCR，支持80+语言'},
+    'paddleocr': {'name': 'PaddleOCR', 'description': '百度PaddleOCR，中文识别效果优秀'},
+    'rapidocr': {'name': 'RapidOCR', 'description': '轻量级高速OCR，基于ONNX Runtime'},
+}
+
 # OCR级别配置
 OCR_LEVELS = {
     'fast': {'name': '快速', 'description': '快速OCR处理，适合简单文档'},
     'standard': {'name': '标准 (默认)', 'description': '标准OCR处理，平衡速度和准确性'},
     'accurate': {'name': '精确', 'description': '高精度OCR处理，适合复杂文档'},
     'detailed': {'name': '详细', 'description': '最详细的OCR处理，包含更多元数据'},
+}
+
+# OCR语言配置
+OCR_LANGUAGES = {
+    'auto': {'name': '自动检测', 'description': '自动检测文档语言'},
+    'chinese': {'name': '中文', 'description': '简体中文和繁体中文'},
+    'english': {'name': '英文', 'description': '英语文档'},
+    'japanese': {'name': '日文', 'description': '日语文档'},
+    'korean': {'name': '韩文', 'description': '韩语文档'},
+    'french': {'name': '法文', 'description': '法语文档'},
+    'german': {'name': '德文', 'description': '德语文档'},
+    'spanish': {'name': '西班牙文', 'description': '西班牙语文档'},
+    'russian': {'name': '俄文', 'description': '俄语文档'},
+    'arabic': {'name': '阿拉伯文', 'description': '阿拉伯语文档'},
 }
 
 # 表格提取格式
@@ -65,7 +89,9 @@ OLLAMA_MODELS = {
 
 # 默认配置
 DEFAULT_CONFIG = {
+    'ocr_engine': 'pdf_craft',
     'ocr_level': 'standard',
+    'ocr_language': 'auto',
     'extract_formula': False,
     'extract_table_format': 'standard',
     'ollama_model': 'none',
@@ -91,6 +117,10 @@ current_config = DEFAULT_CONFIG.copy()
 model_cache = {}
 model_cache_lock = threading.Lock()
 
+# 全局OCR引擎管理器
+ocr_manager = None
+ocr_manager_lock = threading.Lock()
+
 # 性能监控
 performance_stats = {
     'total_pages_processed': 0,
@@ -101,6 +131,21 @@ performance_stats = {
 }
 
 # 从文件加载作业状态
+def initialize_ocr_manager():
+    """初始化OCR引擎管理器"""
+    global ocr_manager
+    with ocr_manager_lock:
+        if ocr_manager is None:
+            try:
+                ocr_manager = OCREngineManager(
+                    model_dir=app.config['MODEL_DIR'],
+                    use_gpu=app.config.get('USE_GPU', False)
+                )
+                logger.info("OCR引擎管理器初始化成功")
+            except Exception as e:
+                logger.error(f"OCR引擎管理器初始化失败: {str(e)}")
+                ocr_manager = None
+
 def load_jobs():
     global jobs, job_queue
     if os.path.exists(app.config['JOBS_FILE']):
@@ -451,14 +496,15 @@ def check_ollama_available():
     except:
         return False, []
 
-def process_pdf(job_id, pdf_path, output_dir):
-    global active_jobs, performance_stats
+def process_pdf_with_ocr_engine(job_id, pdf_path, output_dir):
+    """使用指定OCR引擎处理PDF"""
+    global active_jobs, performance_stats, ocr_manager
     start_time = time.time()
     
     try:
         # Update job status
         jobs[job_id]['status'] = 'processing'
-        save_jobs()  # 保存状态变更
+        save_jobs()
 
         # Create a unique folder for this job's results
         job_result_dir = os.path.join(app.config['RESULTS_FOLDER'], job_id)
@@ -466,7 +512,6 @@ def process_pdf(job_id, pdf_path, output_dir):
 
         # Get the filename without extension
         pdf_filename = os.path.basename(pdf_path)
-        # 使用原始文件名（如果存在）
         if 'original_filename' in jobs[job_id]:
             original_filename = jobs[job_id]['original_filename']
             base_filename = os.path.splitext(original_filename)[0]
@@ -475,87 +520,42 @@ def process_pdf(job_id, pdf_path, output_dir):
 
         # Create markdown output path
         markdown_path = os.path.join(job_result_dir, f"{base_filename}.md")
-        images_dir = "images"
 
-        # Create optimized progress reporter
+        # Create progress reporter
         progress_reporter = OptimizedProgressReporter(job_id)
-
-        # 获取最优设备配置
-        device_config = get_optimal_device_config()
-        device = device_config['device']
-        
-        logger.info(f"Job {job_id}: Using optimized config: {device_config}")
 
         # 获取作业配置
         job_config = jobs[job_id].get('config', current_config)
+        ocr_engine = job_config.get('ocr_engine', 'pdf_craft')
+        ocr_language = job_config.get('ocr_language', 'auto')
 
-        # 获取Ollama模型配置
-        ollama_model = job_config.get('ollama_model', 'none')
+        logger.info(f"Job {job_id}: Using OCR engine: {ocr_engine}, Language: {ocr_language}")
 
-        # 初始化LLM（如果选择了模型）
-        llm = None
-        if ollama_model != 'none':
-            llm = init_ollama_llm(ollama_model)
+        # 确保OCR管理器已初始化
+        if ocr_manager is None:
+            initialize_ocr_manager()
 
-        # 创建优化的PDF提取器
-        extractor = create_optimized_extractor(device_config, app.config['MODEL_DIR'])
+        if ocr_manager is None:
+            raise RuntimeError("OCR引擎管理器初始化失败")
 
-        # 记录使用的配置
-        config_info = {
-            'device': device,
-            'batch_size': device_config['batch_size'],
-            'ollama_model': ollama_model,
-            'optimization_enabled': True,
-            'mixed_precision': device_config.get('mixed_precision', False)
-        }
+        # 使用OCR引擎处理PDF
+        if ocr_engine == 'pdf_craft':
+            # 使用原有的PDF-Craft处理方式
+            result = process_pdf_with_pdf_craft(job_id, pdf_path, job_result_dir, progress_reporter, job_config)
+        else:
+            # 使用新的OCR引擎
+            result = process_pdf_with_new_ocr(job_id, pdf_path, job_result_dir, progress_reporter, job_config, ocr_engine, ocr_language)
 
-        # 获取并记录模型信息
-        model_files = os.listdir(app.config['MODEL_DIR']) if os.path.exists(app.config['MODEL_DIR']) else []
-        logger.info(f"Job {job_id}: Models available: {model_files}")
+        if not result:
+            raise RuntimeError("PDF处理失败")
 
-        # 记录开始处理PDF
-        logger.info(f"Job {job_id}: Starting optimized PDF processing with config: {config_info}")
-
-        # 使用稳定的处理方式
-        try:
-            logger.info(f"开始处理PDF文件: {pdf_path}")
-            with MarkDownWriter(markdown_path, images_dir, "utf-8") as md:
-                # 根据配置选择处理方式
-                if app.config['ENABLE_MULTIPROCESSING']:
-                    # 尝试使用优化的处理方式
-                    logger.info("使用优化的处理方式")
-                    blocks = process_pdf_pages_parallel(extractor, pdf_path, progress_reporter, job_config)
-                    for block in blocks:
-                        if block:  # 确保block不为None
-                            md.write(block)
-                else:
-                    # 使用标准串行处理
-                    logger.info("使用标准串行处理")
-                    for block in extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report):
-                        md.write(block)
-                        
-            logger.info(f"PDF处理完成: {markdown_path}")
-        except Exception as e:
-            logger.error(f"PDF处理失败，尝试最基本的处理方式: {str(e)}")
-            try:
-                # 最后的回退方案：使用最基本的处理方式
-                with MarkDownWriter(markdown_path, images_dir, "utf-8") as md:
-                    for block in extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report):
-                        md.write(block)
-                logger.info("使用基本处理方式成功")
-            except Exception as fallback_e:
-                logger.error(f"基本处理方式也失败: {str(fallback_e)}")
-                raise fallback_e
-
-        # 生成Word文档
+        # 生成其他格式文件
         word_path = os.path.join(job_result_dir, f"{base_filename}.docx")
-        create_word_from_markdown(markdown_path, word_path, os.path.join(job_result_dir, images_dir))
+        create_word_from_markdown(markdown_path, word_path, os.path.join(job_result_dir, "images"))
 
-        # 生成带文本的PDF
         text_pdf_path = os.path.join(job_result_dir, f"{base_filename}_text.pdf")
-        create_text_pdf_from_markdown(markdown_path, text_pdf_path, os.path.join(job_result_dir, images_dir))
+        create_text_pdf_from_markdown(markdown_path, text_pdf_path, os.path.join(job_result_dir, "images"))
 
-        # 生成完整压缩包
         complete_zip_path = os.path.join(job_result_dir, f"{base_filename}_complete.zip")
         create_complete_zip(job_result_dir, complete_zip_path, base_filename)
 
@@ -563,7 +563,6 @@ def process_pdf(job_id, pdf_path, output_dir):
         end_time = time.time()
         processing_time = end_time - start_time
         
-        # 更新性能统计
         total_pages = progress_reporter.total_pages
         if total_pages > 0:
             performance_stats['total_pages_processed'] += total_pages
@@ -582,31 +581,104 @@ def process_pdf(job_id, pdf_path, output_dir):
             'word_filename': f"{base_filename}.docx",
             'text_pdf_filename': f"{base_filename}_text.pdf",
             'complete_zip_filename': f"{base_filename}_complete.zip",
-            'device_used': device,
-            'model_dir': app.config['MODEL_DIR'],
+            'ocr_engine': ocr_engine,
             'processing_time': processing_time,
-            'config': config_info,
             'performance': {
                 'total_pages': total_pages,
                 'pages_per_second': total_pages / processing_time if processing_time > 0 else 0,
-                'optimization_used': True
+                'ocr_engine_used': ocr_engine
             }
         }
-        logger.info(f"Job {job_id}: Completed successfully in {processing_time:.2f} seconds ({total_pages / processing_time if processing_time > 0 else 0:.2f} pages/sec)")
-        save_jobs()  # 保存完成状态
+        logger.info(f"Job {job_id}: Completed successfully in {processing_time:.2f} seconds using {ocr_engine}")
+        save_jobs()
 
     except Exception as e:
-        # Update job status to failed
         jobs[job_id]['status'] = 'failed'
         jobs[job_id]['error'] = str(e)
         logger.error(f"Job {job_id}: Failed with error: {str(e)}")
-        save_jobs()  # 保存失败状态
+        save_jobs()
     finally:
-        # 减少活跃作业计数
         with queue_lock:
             active_jobs -= 1
-        # 处理队列中的下一个作业
         process_next_job()
+
+def process_pdf_with_pdf_craft(job_id, pdf_path, job_result_dir, progress_reporter, job_config):
+    """使用PDF-Craft处理PDF"""
+    try:
+        base_filename = os.path.splitext(os.path.basename(pdf_path))[0]
+        if 'original_filename' in jobs[job_id]:
+            original_filename = jobs[job_id]['original_filename']
+            base_filename = os.path.splitext(original_filename)[0]
+            
+        markdown_path = os.path.join(job_result_dir, f"{base_filename}.md")
+        images_dir = "images"
+
+        # 获取设备配置
+        device_config = get_optimal_device_config()
+        extractor = create_optimized_extractor(device_config, app.config['MODEL_DIR'])
+
+        logger.info(f"开始使用PDF-Craft处理PDF文件: {pdf_path}")
+        with MarkDownWriter(markdown_path, images_dir, "utf-8") as md:
+            for block in extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report):
+                md.write(block)
+                
+        logger.info(f"PDF-Craft处理完成: {markdown_path}")
+        return True
+    except Exception as e:
+        logger.error(f"PDF-Craft处理失败: {str(e)}")
+        return False
+
+def process_pdf_with_new_ocr(job_id, pdf_path, job_result_dir, progress_reporter, job_config, ocr_engine, ocr_language):
+    """使用新OCR引擎处理PDF"""
+    try:
+        base_filename = os.path.splitext(os.path.basename(pdf_path))[0]
+        if 'original_filename' in jobs[job_id]:
+            original_filename = jobs[job_id]['original_filename']
+            base_filename = os.path.splitext(original_filename)[0]
+            
+        markdown_path = os.path.join(job_result_dir, f"{base_filename}.md")
+
+        logger.info(f"开始使用{ocr_engine}处理PDF文件: {pdf_path}")
+        
+        # 使用OCR引擎管理器提取文本
+        def progress_callback(current, total):
+            progress_reporter.report(current, total)
+            
+        results = ocr_manager.extract_text_from_pdf(
+            pdf_path=pdf_path,
+            engine_name=ocr_engine,
+            language=ocr_language,
+            progress_callback=progress_callback
+        )
+
+        # 将结果写入Markdown文件
+        with open(markdown_path, 'w', encoding='utf-8') as f:
+            f.write(f"# {base_filename}\n\n")
+            f.write(f"*使用 {ocr_engine} 引擎处理*\n\n")
+            
+            for i, result in enumerate(results):
+                if 'error' in result and result['error']:
+                    f.write(f"## 第 {i+1} 页 (处理失败)\n\n")
+                    f.write(f"错误: {result['error']}\n\n")
+                else:
+                    f.write(f"## 第 {i+1} 页\n\n")
+                    if result.get('text'):
+                        f.write(result['text'])
+                        f.write("\n\n")
+                    
+                    # 添加处理信息
+                    if 'processing_time' in result:
+                        f.write(f"*处理时间: {result['processing_time']:.2f}秒*\n\n")
+
+        logger.info(f"{ocr_engine}处理完成: {markdown_path}")
+        return True
+    except Exception as e:
+        logger.error(f"{ocr_engine}处理失败: {str(e)}")
+        return False
+
+def process_pdf(job_id, pdf_path, output_dir):
+    """处理PDF的主函数，根据配置选择处理方式"""
+    return process_pdf_with_ocr_engine(job_id, pdf_path, output_dir)
 
 def create_word_from_markdown(markdown_path, word_path, images_dir):
     """将Markdown转换为Word文档"""
@@ -801,6 +873,15 @@ def process_next_job():
 
 @app.route('/')
 def index():
+    # 初始化OCR管理器
+    if ocr_manager is None:
+        initialize_ocr_manager()
+    
+    # 获取可用的OCR引擎
+    available_ocr_engines = {}
+    if ocr_manager:
+        available_ocr_engines = ocr_manager.get_available_engines()
+    
     # 检查Ollama是否可用
     ollama_available, available_models = check_ollama_available()
 
@@ -822,7 +903,10 @@ def index():
     # 传递设备信息和模型配置到模板
     return render_template('index.html',
                           use_gpu=app.config['USE_GPU'],
+                          ocr_engines=OCR_ENGINES,
+                          available_ocr_engines=available_ocr_engines,
                           ocr_levels=OCR_LEVELS,
+                          ocr_languages=OCR_LANGUAGES,
                           table_formats=TABLE_FORMATS,
                           ollama_models=OLLAMA_MODELS,
                           ollama_available=ollama_available,
@@ -841,9 +925,17 @@ def update_config():
     try:
         data = request.get_json()
 
+        # 验证OCR引擎
+        if 'ocr_engine' in data and data['ocr_engine'] in OCR_ENGINES:
+            current_config['ocr_engine'] = data['ocr_engine']
+
         # 验证OCR级别
         if 'ocr_level' in data and data['ocr_level'] in OCR_LEVELS:
             current_config['ocr_level'] = data['ocr_level']
+
+        # 验证OCR语言
+        if 'ocr_language' in data and data['ocr_language'] in OCR_LANGUAGES:
+            current_config['ocr_language'] = data['ocr_language']
 
         # 验证表格提取格式
         if 'extract_table_format' in data and data['extract_table_format'] in TABLE_FORMATS:
@@ -977,6 +1069,43 @@ def system_info():
         }
     })
 
+@app.route('/ocr_engines')
+def get_ocr_engines():
+    """获取可用的OCR引擎"""
+    if ocr_manager is None:
+        initialize_ocr_manager()
+    
+    if ocr_manager:
+        available_engines = ocr_manager.get_available_engines()
+        return jsonify({
+            'engines': available_engines,
+            'current_engine': current_config.get('ocr_engine', 'pdf_craft')
+        })
+    else:
+        return jsonify({'error': 'OCR引擎管理器未初始化'}), 500
+
+@app.route('/benchmark_ocr', methods=['POST'])
+def benchmark_ocr():
+    """对比OCR引擎性能"""
+    if ocr_manager is None:
+        initialize_ocr_manager()
+    
+    if not ocr_manager:
+        return jsonify({'error': 'OCR引擎管理器未初始化'}), 500
+    
+    data = request.get_json()
+    test_file = data.get('test_file')
+    
+    if not test_file or not os.path.exists(test_file):
+        return jsonify({'error': '测试文件不存在'}), 400
+    
+    try:
+        results = ocr_manager.benchmark_engines(test_file, max_pages=3)
+        return jsonify({'benchmark_results': results})
+    except Exception as e:
+        logger.error(f"OCR引擎性能测试失败: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
     if 'files[]' not in request.files:
@@ -991,7 +1120,9 @@ def upload_file():
     job_config = {}
     if request.form.get('use_custom_config') == 'true':
         # 使用自定义配置
+        job_config['ocr_engine'] = request.form.get('ocr_engine', current_config['ocr_engine'])
         job_config['ocr_level'] = request.form.get('ocr_level', current_config['ocr_level'])
+        job_config['ocr_language'] = request.form.get('ocr_language', current_config['ocr_language'])
         job_config['extract_table_format'] = request.form.get('extract_table_format', current_config['extract_table_format'])
         job_config['extract_formula'] = request.form.get('extract_formula') == 'true'
         job_config['ollama_model'] = request.form.get('ollama_model', current_config['ollama_model'])
@@ -1545,6 +1676,9 @@ def run_mode():
 
 # 应用启动时加载作业状态
 load_jobs()
+
+# 初始化OCR引擎管理器
+initialize_ocr_manager()
 
 # 启动时处理队列中的作业
 def start_processing_queue():
