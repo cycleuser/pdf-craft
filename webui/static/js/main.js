@@ -1,4 +1,4 @@
-// PDF转Markdown工具 - 主要JavaScript文件
+// 基于光学字符识别和本地大语言模型的文档转换平台 - 主要JavaScript文件
 console.log('开始加载main.js...');
 
 document.addEventListener('DOMContentLoaded', function() {
