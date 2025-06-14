@@ -249,27 +249,60 @@ def get_optimal_device_config():
 def create_optimized_extractor(device_config, model_dir):
     """创建优化的PDF提取器"""
     with model_cache_lock:
-        cache_key = f"{device_config['device']}_{device_config['batch_size']}"
+        cache_key = f"{device_config['device']}"
         
         if cache_key in model_cache and app.config['PRELOAD_MODELS']:
             logger.info(f"使用缓存的模型: {cache_key}")
             return model_cache[cache_key]
         
         try:
-            # 创建优化的提取器
-            extractor = PDFPageExtractor(
-                device=device_config['device'],
-                model_dir_path=model_dir,
-                batch_size=device_config['batch_size']
-            )
+            # 检查PDFPageExtractor支持的参数
+            import inspect
+            extractor_signature = inspect.signature(PDFPageExtractor.__init__)
+            supported_params = list(extractor_signature.parameters.keys())
+            
+            # 构建参数字典，只包含支持的参数
+            extractor_params = {}
+            
+            # 设备参数
+            if 'device' in supported_params:
+                extractor_params['device'] = device_config['device']
+            
+            # 模型目录参数
+            if 'model_dir_path' in supported_params:
+                extractor_params['model_dir_path'] = model_dir
+            elif 'model_dir' in supported_params:
+                extractor_params['model_dir'] = model_dir
+            
+            # 批处理大小参数（如果支持）
+            if 'batch_size' in supported_params:
+                extractor_params['batch_size'] = device_config['batch_size']
+            
+            logger.info(f"创建提取器，支持的参数: {supported_params}")
+            logger.info(f"使用的参数: {extractor_params}")
+            
+            # 创建提取器
+            extractor = PDFPageExtractor(**extractor_params)
             
             # 如果支持，启用优化选项
             if hasattr(extractor, 'enable_optimization'):
-                extractor.enable_optimization(
-                    mixed_precision=device_config.get('mixed_precision', False),
-                    memory_efficient=app.config['OPTIMIZE_MEMORY'],
-                    parallel_processing=True
-                )
+                try:
+                    extractor.enable_optimization(
+                        mixed_precision=device_config.get('mixed_precision', False),
+                        memory_efficient=app.config['OPTIMIZE_MEMORY'],
+                        parallel_processing=True
+                    )
+                    logger.info("已启用提取器优化选项")
+                except Exception as opt_e:
+                    logger.warning(f"启用优化选项失败: {str(opt_e)}")
+            
+            # 设置批处理大小（如果支持）
+            if hasattr(extractor, 'set_batch_size'):
+                try:
+                    extractor.set_batch_size(device_config['batch_size'])
+                    logger.info(f"已设置批处理大小: {device_config['batch_size']}")
+                except Exception as batch_e:
+                    logger.warning(f"设置批处理大小失败: {str(batch_e)}")
             
             if app.config['PRELOAD_MODELS']:
                 model_cache[cache_key] = extractor
@@ -279,11 +312,13 @@ def create_optimized_extractor(device_config, model_dir):
             
         except Exception as e:
             logger.error(f"创建优化提取器失败: {str(e)}")
-            # 回退到基本配置
-            return PDFPageExtractor(
-                device=device_config['device'],
-                model_dir_path=model_dir
-            )
+            # 回退到最基本的配置
+            try:
+                return PDFPageExtractor(model_dir_path=model_dir)
+            except Exception as fallback_e:
+                logger.error(f"回退创建提取器也失败: {str(fallback_e)}")
+                # 最后的回退，不指定任何参数
+                return PDFPageExtractor()
 
 def process_pdf_pages_parallel(extractor, pdf_path, progress_reporter, job_config):
     """并行处理PDF页面"""
@@ -294,82 +329,33 @@ def process_pdf_pages_parallel(extractor, pdf_path, progress_reporter, job_confi
         total_pages = len(doc)
         doc.close()
         
-        # 根据页面数决定处理策略
+        logger.info(f"PDF页面总数: {total_pages}")
+        
+        # 检查是否支持单页处理
+        supports_page_extraction = hasattr(extractor, 'extract_page')
+        
+        # 检查当前pdf_craft库是否支持并行处理
+        if not supports_page_extraction:
+            logger.warning("当前pdf_craft版本不支持单页提取，使用标准串行处理")
+            return list(extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report))
+            
+        # 对于小文档，直接使用标准处理
         if total_pages <= 10:
-            # 小文档直接处理
+            logger.info("小文档，使用标准处理")
             return list(extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report))
         
-        # 大文档分批并行处理
-        device_config = get_optimal_device_config()
-        batch_size = device_config['batch_size']
-        
-        results = []
-        
-        if app.config['ENABLE_MULTIPROCESSING'] and total_pages > 20:
-            # 使用多进程处理大文档
-            with ProcessPoolExecutor(max_workers=app.config['PROCESS_POOL_SIZE']) as executor:
-                futures = []
-                
-                for start_page in range(0, total_pages, batch_size):
-                    end_page = min(start_page + batch_size, total_pages)
-                    future = executor.submit(
-                        process_pdf_batch,
-                        pdf_path,
-                        start_page,
-                        end_page,
-                        device_config,
-                        app.config['MODEL_DIR'],
-                        job_config
-                    )
-                    futures.append((future, start_page, end_page))
-                
-                # 收集结果
-                for future, start_page, end_page in futures:
-                    try:
-                        batch_results = future.result(timeout=300)  # 5分钟超时
-                        results.extend(batch_results)
-                        progress_reporter.report(end_page, total_pages)
-                    except Exception as e:
-                        logger.error(f"批处理失败 (页面 {start_page}-{end_page}): {str(e)}")
-                        # 回退到单页处理
-                        for page_num in range(start_page, end_page):
-                            try:
-                                page_result = process_single_page(pdf_path, page_num, device_config, app.config['MODEL_DIR'], job_config)
-                                results.append(page_result)
-                                progress_reporter.report(page_num + 1, total_pages)
-                            except Exception as page_e:
-                                logger.error(f"单页处理失败 (页面 {page_num}): {str(page_e)}")
-        else:
-            # 使用线程池处理中等文档
-            with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 1)) as executor:
-                futures = []
-                
-                for page_num in range(total_pages):
-                    future = executor.submit(
-                        process_single_page,
-                        pdf_path,
-                        page_num,
-                        device_config,
-                        app.config['MODEL_DIR'],
-                        job_config
-                    )
-                    futures.append((future, page_num))
-                
-                # 收集结果
-                for future, page_num in futures:
-                    try:
-                        page_result = future.result(timeout=60)  # 1分钟超时
-                        results.append(page_result)
-                        progress_reporter.report(page_num + 1, total_pages)
-                    except Exception as e:
-                        logger.error(f"页面处理失败 (页面 {page_num}): {str(e)}")
-        
-        return results
+        # 尝试使用优化的处理方式
+        logger.info("尝试使用优化的处理方式")
+        return list(extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report))
         
     except Exception as e:
         logger.error(f"并行处理失败，回退到串行处理: {str(e)}")
         # 回退到原始处理方式
-        return list(extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report))
+        try:
+            return list(extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report))
+        except Exception as fallback_e:
+            logger.error(f"串行处理也失败: {str(fallback_e)}")
+            return []
 
 def process_pdf_batch(pdf_path, start_page, end_page, device_config, model_dir, job_config):
     """处理PDF批次（多进程函数）"""
@@ -525,25 +511,36 @@ def process_pdf(job_id, pdf_path, output_dir):
         # 记录开始处理PDF
         logger.info(f"Job {job_id}: Starting optimized PDF processing with config: {config_info}")
 
-        # 使用优化的并行处理
+        # 使用稳定的处理方式
         try:
+            logger.info(f"开始处理PDF文件: {pdf_path}")
             with MarkDownWriter(markdown_path, images_dir, "utf-8") as md:
+                # 根据配置选择处理方式
                 if app.config['ENABLE_MULTIPROCESSING']:
-                    # 使用并行处理
+                    # 尝试使用优化的处理方式
+                    logger.info("使用优化的处理方式")
                     blocks = process_pdf_pages_parallel(extractor, pdf_path, progress_reporter, job_config)
                     for block in blocks:
                         if block:  # 确保block不为None
                             md.write(block)
                 else:
-                    # 使用原始串行处理
+                    # 使用标准串行处理
+                    logger.info("使用标准串行处理")
                     for block in extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report):
                         md.write(block)
+                        
+            logger.info(f"PDF处理完成: {markdown_path}")
         except Exception as e:
-            logger.warning(f"优化处理失败，回退到标准处理: {str(e)}")
-            # 回退到标准处理
-            with MarkDownWriter(markdown_path, images_dir, "utf-8") as md:
-                for block in extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report):
-                    md.write(block)
+            logger.error(f"PDF处理失败，尝试最基本的处理方式: {str(e)}")
+            try:
+                # 最后的回退方案：使用最基本的处理方式
+                with MarkDownWriter(markdown_path, images_dir, "utf-8") as md:
+                    for block in extractor.extract(pdf=pdf_path, report_progress=progress_reporter.report):
+                        md.write(block)
+                logger.info("使用基本处理方式成功")
+            except Exception as fallback_e:
+                logger.error(f"基本处理方式也失败: {str(fallback_e)}")
+                raise fallback_e
 
         # 生成Word文档
         word_path = os.path.join(job_result_dir, f"{base_filename}.docx")

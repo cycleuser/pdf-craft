@@ -178,3 +178,4 @@ cython_debug/
 .pypirc
 /webui/results
 /pdf_samples
+/webui/uploads
