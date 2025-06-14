@@ -466,7 +466,12 @@ def process_pdf(job_id, pdf_path, output_dir):
 
         # Get the filename without extension
         pdf_filename = os.path.basename(pdf_path)
-        base_filename = os.path.splitext(pdf_filename)[0]
+        # 使用原始文件名（如果存在）
+        if 'original_filename' in jobs[job_id]:
+            original_filename = jobs[job_id]['original_filename']
+            base_filename = os.path.splitext(original_filename)[0]
+        else:
+            base_filename = os.path.splitext(pdf_filename)[0]
 
         # Create markdown output path
         markdown_path = os.path.join(job_result_dir, f"{base_filename}.md")
@@ -1000,8 +1005,17 @@ def upload_file():
             # Generate a unique ID for the job
             job_id = str(uuid.uuid4())
 
-            # Secure the filename
-            filename = secure_filename(file.filename)
+            # 保留原始文件名，包括中文
+            original_filename = file.filename
+            # 生成安全的文件名用于存储
+            safe_filename = secure_filename(file.filename)
+            # 如果安全文件名为空或只有扩展名，使用UUID
+            if not safe_filename or safe_filename.startswith('.'):
+                file_ext = os.path.splitext(original_filename)[1]
+                safe_filename = f"{job_id}{file_ext}"
+            
+            # 确保文件名唯一
+            filename = safe_filename
 
             # Save the file
             file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
@@ -1012,6 +1026,7 @@ def upload_file():
             jobs[job_id] = {
                 'id': job_id,
                 'filename': filename,
+                'original_filename': original_filename,  # 保存原始文件名
                 'file_path': file_path,
                 'status': 'queued',
                 'progress': {
@@ -1033,6 +1048,7 @@ def upload_file():
             uploaded_files.append({
                 'job_id': job_id,
                 'filename': filename,
+                'original_filename': original_filename,
                 'config': job_config
             })
 
@@ -1457,6 +1473,75 @@ def apply_preset_config(preset_name):
     except Exception as e:
         logger.error(f"应用预设配置失败: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/run_mode', methods=['GET', 'POST'])
+def run_mode():
+    """获取或设置运行模式"""
+    if request.method == 'GET':
+        # 获取当前运行模式
+        current_mode = 'compatible'  # 默认兼容模式
+        if app.config.get('ENABLE_MULTIPROCESSING') and app.config.get('USE_GPU'):
+            current_mode = 'performance'
+        elif app.config.get('USE_GPU') or app.config.get('ENABLE_MULTIPROCESSING'):
+            current_mode = 'balanced'
+        
+        return jsonify({
+            'current_mode': current_mode,
+            'modes': {
+                'compatible': {
+                    'name': '兼容模式',
+                    'description': '最高稳定性，适合所有环境'
+                },
+                'balanced': {
+                    'name': '平衡模式',
+                    'description': '平衡性能和稳定性'
+                },
+                'performance': {
+                    'name': '性能模式',
+                    'description': '最大化处理速度'
+                }
+            }
+        })
+    
+    elif request.method == 'POST':
+        # 设置运行模式
+        data = request.get_json()
+        mode = data.get('mode', 'compatible')
+        
+        if mode == 'compatible':
+            # 兼容模式：禁用所有高级功能
+            app.config['USE_GPU'] = False
+            app.config['ENABLE_MULTIPROCESSING'] = False
+            app.config['ENABLE_MIXED_PRECISION'] = False
+            app.config['PRELOAD_MODELS'] = False
+            app.config['BATCH_SIZE'] = 3
+            
+        elif mode == 'balanced':
+            # 平衡模式：启用部分优化
+            app.config['USE_GPU'] = True
+            app.config['ENABLE_MULTIPROCESSING'] = False
+            app.config['ENABLE_MIXED_PRECISION'] = False
+            app.config['PRELOAD_MODELS'] = True
+            app.config['BATCH_SIZE'] = 5
+            
+        elif mode == 'performance':
+            # 性能模式：启用所有优化
+            app.config['USE_GPU'] = True
+            app.config['ENABLE_MULTIPROCESSING'] = True
+            app.config['ENABLE_MIXED_PRECISION'] = True
+            app.config['PRELOAD_MODELS'] = True
+            app.config['BATCH_SIZE'] = 8
+            
+        else:
+            return jsonify({'error': '无效的运行模式'}), 400
+        
+        logger.info(f"运行模式已切换到: {mode}")
+        
+        return jsonify({
+            'success': True,
+            'mode': mode,
+            'message': f'已切换到{mode}模式'
+        })
 
 # 应用启动时加载作业状态
 load_jobs()
